@@ -22,6 +22,11 @@
 #include <comm/bt_lock.h>
 #include <kernel/events.h>
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+#include <applib/ui/vibes.h>
+#include <kernel/event_loop.h>
+#endif
+
 PBL_LOG_MODULE_DECLARE(bt, CONFIG_BT_LOG_LEVEL);
 
 //! About this module
@@ -110,6 +115,23 @@ static bool s_has_pending_create_connection;
 
 //! True if the device is currently connected as LE Slave (4.0)
 static bool s_is_connected_as_slave;
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+#define GAP_LE_INVALID_CONN_HANDLE (0xFFFF)
+//! Number of links on which the local device is LE Slave.
+static uint8_t s_num_slave_links;
+//! Handle of the first slave link: legacy connection events are only sent for this one, so the
+//! rest of the system keeps seeing a single phone.
+static uint16_t s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
+
+static void prv_multi_link_vibe_kernel_main_cb(void *data) {
+  if ((uintptr_t)data) {
+    vibes_double_pulse();
+  } else {
+    vibes_short_pulse();
+  }
+}
+#endif
 
 //! Role switching is not implemented: always act as slave (never perform LE Create Connection).
 static const GAPLERole s_current_role = GAPLERoleSlave;
@@ -309,7 +331,19 @@ void pbl_bt_handle_le_connection_complete_event(const struct pbl_bt_conn_complet
         s_is_connected_as_slave = true;
         gap_le_advert_handle_connect_as_slave();
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+        s_num_slave_links++;
+        PBL_LOG_INFO("Multi-link: slave link up hdl=%u, links=%u", event->handle,
+                     s_num_slave_links);
+        if (s_primary_slave_handle == GAP_LE_INVALID_CONN_HANDLE) {
+          s_primary_slave_handle = event->handle;
+          prv_put_legacy_connection_event(&event->peer_address, true /* connected */);
+        } else {
+          launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)1);
+        }
+#else
         prv_put_legacy_connection_event(&event->peer_address, true /* connected */);
+#endif
       }
 
       if (gap_le_connection_is_connected(&event->peer_address)) {
@@ -425,10 +459,28 @@ void pbl_bt_handle_le_disconnection_complete_event(
                                                                 &connection->remote_version_info);
 
       if (!local_is_master) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+        if (s_num_slave_links > 0) {
+          s_num_slave_links--;
+        }
+        PBL_LOG_INFO("Multi-link: slave link down hdl=%u, links=%u", event->handle,
+                     s_num_slave_links);
+        if (event->handle == s_primary_slave_handle) {
+          s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
+          prv_put_legacy_connection_event(&event->peer_address, false /* disconnected */);
+        } else {
+          launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)0);
+        }
+        // "Connected as slave" follows the primary link only, so that reconnection advertising
+        // for the phone still starts while a second device stays connected.
+        s_is_connected_as_slave = (s_primary_slave_handle != GAP_LE_INVALID_CONN_HANDLE);
+        gap_le_advert_handle_disconnect_as_slave();
+#else
         s_is_connected_as_slave = false;
         gap_le_advert_handle_disconnect_as_slave();
 
         prv_put_legacy_connection_event(&event->peer_address, false /* disconnected */);
+#endif
       }
 
       GAPLEConnectionIntent *intent = s_intents;
@@ -934,6 +986,18 @@ bool gap_le_connect_is_connected_as_slave(void) {
   return connected;
 }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+uint8_t gap_le_connect_num_slave_links(void) {
+  uint8_t num;
+  bt_lock();
+  {
+    num = s_num_slave_links;
+  }
+  bt_unlock();
+  return num;
+}
+#endif
+
 // -------------------------------------------------------------------------------------------------
 
 void gap_le_connect_init(void) {
@@ -974,6 +1038,10 @@ void gap_le_connect_deinit(void) {
       bluetooth_analytics_handle_disconnect(false);
       s_is_connected_as_slave = false;
     }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+    s_num_slave_links = 0;
+    s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
+#endif
   }
   bt_unlock();
 }
