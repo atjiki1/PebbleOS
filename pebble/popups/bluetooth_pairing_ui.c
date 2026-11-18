@@ -25,6 +25,9 @@
 #include <applib/ui/window_private.h>
 #include <applib/ui/window_stack.h>
 #include <comm/bt_lock.h>
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+#include <comm/ble/gap_le_connect.h>
+#endif
 #include <kernel/event_loop.h>
 #include <kernel/events.h>
 #include <kernel/pebble_tasks.h>
@@ -651,6 +654,15 @@ static void prv_copy_string_and_move_cursor(const char *in_str, char **out_str, 
 void pbl_bt_cb_pairing_confirm_handle_request(const struct pbl_bt_pairing_confirm_ctx *ctx,
                                               const char *device_name,
                                               const char *confirmation_token) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  // Multi-link experiment: never pair over a second link. Storing a second bonding would replace
+  // the phone's bonding (single BLE bonding policy).
+  if (gap_le_connect_num_slave_links() > 1) {
+    PBL_LOG_WRN("Multi-link: rejecting pairing on a second link");
+    pbl_bt_pairing_confirm(ctx, false /* is_confirmed */);
+    return;
+  }
+#endif
   // events.c clean-up (see event_deinit) can only clean up one associated heap allocation,
   // so put everything in a single buffer:
   size_t device_name_len = device_name ? (strlen(device_name) + 1) : 0;

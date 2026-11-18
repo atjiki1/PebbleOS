@@ -23,6 +23,17 @@ config BLE_GATT_SUBSCRIPTION_DEPTH
       Per-client GATT subscription buffer depth, in max-size notifications.
       Deeper absorbs notification bursts (fewer drops) at the cost of RAM.
 
+config BT_MULTI_LINK_EXPERIMENT
+    bool "Experimental: accept a second BLE link"
+    default n
+    depends on !RECOVERY_FW
+    help
+      Experiment for multi-device support. Raises the NimBLE link limit to 2,
+      keeps advertising while Settings > Bluetooth is open even with a paired
+      phone, and vibrates (double pulse) when a second device connects, short
+      pulse when it disconnects. The second link is never paired and gets no
+      ANCS/AMS/PPoGATT: it only shows whether the controller accepts it.
+
 config BT_ANCS_CLIENT
     bool "ANCS (Apple Notification Center Service) client"
     default y if !RECOVERY_FW

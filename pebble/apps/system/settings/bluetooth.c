@@ -226,6 +226,11 @@ static void prv_settings_bluetooth_event_handler(PebbleEvent *event, void *conte
       settings_bluetooth_update_remotes_private(settings_data);
       bool has_remotes = (settings_data->remote_list_head != nullptr);
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+      // Multi-link experiment: keep advertising for as long as this menu is open.
+      (void)had_remotes;
+      (void)has_remotes;
+#else
       // Handle single phone pairing policy: enable/disable advertising based on pairing state
       if (had_remotes && !has_remotes) {
         // Device was removed, enable advertising
@@ -242,6 +247,7 @@ static void prv_settings_bluetooth_event_handler(PebbleEvent *event, void *conte
           PBL_LOG_INFO("Disabled advertising - device paired");
         }
       }
+#endif
 
       settings_menu_reload_data(SettingsMenuItemBluetooth);
       break;
@@ -561,7 +567,12 @@ static void prv_expand_cb(SettingsCallbacks *context) {
 
   // Only enable pairing/advertising if there are no paired devices (single phone policy)
   data->did_enable_pairability = false;
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  // Multi-link experiment: advertise even with a paired phone, so a second device can connect.
+  if (true) {
+#else
   if (!data->remote_list_head) {
+#endif
     bt_pairability_use();
     data->did_enable_pairability = true;
   }

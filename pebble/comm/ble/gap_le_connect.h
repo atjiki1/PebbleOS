@@ -26,6 +26,11 @@ void gap_le_connect_deinit(void);
 
 bool gap_le_connect_is_connected_as_slave(void);
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Number of links on which the local device is currently LE Slave.
+uint8_t gap_le_connect_num_slave_links(void);
+#endif
+
 void gap_le_connect_handle_bonding_change(pbl_bt_bonding_id_t bonding, BtPersistBondingOp op);
 
 enum pbl_bt_errno gap_le_connect_connect(const struct pbl_bt_device_internal *device,

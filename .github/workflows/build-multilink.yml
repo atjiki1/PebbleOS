@@ -1,0 +1,87 @@
+name: Build Multi-link Experiment
+
+# pebble-sync+2: builds Pebble Time 2 (obelix) firmware with
+# CONFIG_BT_MULTI_LINK_EXPERIMENT=y and uploads the .pbz bundle.
+
+on:
+  push:
+    branches: [multi-link-experiment]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    container:
+      image: ghcr.io/coredevices/pebbleos-docker:v16
+
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - obelix@pvt
+          - obelix@dvt
+        slot:
+          - 0
+          - 1
+
+    steps:
+      - name: Mark Github workspace as safe
+        run: git config --system --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Submodules
+        uses: ./.github/actions/rebase
+        with:
+          submodules: true
+
+      - name: Install Python dependencies
+        run: |
+          pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Set names
+        id: names
+        env:
+          BOARD: ${{ matrix.board }}
+        run: |
+          echo "BOARD=$(printf '%s' "$BOARD" | tr @ _)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure
+        run: >
+          pbl configure --board '${{ matrix.board }}'
+          -DCONFIG_FIRMWARE_SLOT=${{ matrix.slot }}
+          -DCONFIG_RELEASE=y
+          -DCONFIG_BT_MULTI_LINK_EXPERIMENT=y
+
+      - name: Check config
+        run: |
+          grep -E 'CONFIG_BT_MULTI_LINK_EXPERIMENT|CONFIG_NIMBLE_BLE_MAX_CONNECTIONS' -r build --include='.config' --include='*.conf' --include='autoconf.h' | head -20 || true
+
+      - name: Build
+        run: pbl build
+
+      - name: Bundle
+        run: pbl bundle
+
+      - name: Copy artifacts
+        env:
+          BOARD: ${{ steps.names.outputs.BOARD }}
+        run: |
+          mkdir artifacts
+          cp build/normal_${BOARD}_*.pbz artifacts/
+          cp build/pebbleos.elf "artifacts/firmware_${BOARD}_slot${{ matrix.slot }}.elf"
+          cp build/log.dict.json "artifacts/firmware_${BOARD}_slot${{ matrix.slot }}_loghash_dict.json"
+
+      - name: Store
+        uses: actions/upload-artifact@v7
+        with:
+          name: multilink-${{ steps.names.outputs.BOARD }}_slot${{ matrix.slot }}
+          path: artifacts
