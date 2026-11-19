@@ -26,6 +26,8 @@
 #include <applib/ui/window_stack.h>
 #include <comm/bt_lock.h>
 #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+#include <pbl/services/bluetooth/pairability.h>
+
 #include <comm/ble/gap_le_connect.h>
 #endif
 #include <kernel/event_loop.h>
@@ -655,9 +657,9 @@ void pbl_bt_cb_pairing_confirm_handle_request(const struct pbl_bt_pairing_confir
                                               const char *device_name,
                                               const char *confirmation_token) {
 #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
-  // Multi-link experiment: never pair over a second link. Storing a second bonding would replace
-  // the phone's bonding (single BLE bonding policy).
-  if (gap_le_connect_num_slave_links() > 1) {
+  // Multi-link: only pair over a second link while the Bluetooth settings menu is open, where the
+  // new bonding becomes the secondary device instead of replacing the phone.
+  if (gap_le_connect_num_slave_links() > 1 && !bt_pairability_is_secondary_pairing()) {
     PBL_LOG_WRN("Multi-link: rejecting pairing on a second link");
     pbl_bt_pairing_confirm(ctx, false /* is_confirmed */);
     return;

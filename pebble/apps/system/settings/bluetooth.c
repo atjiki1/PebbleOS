@@ -388,9 +388,21 @@ static int16_t prv_get_row_base_height(SettingsBluetoothData *data, uint16_t row
 }
 
 static const char *prv_get_hint(SettingsBluetoothData *data) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  // One phone and one secondary device can be paired.
+  if (list_count(data->remote_list_head) == 1) {
+    return pbl_i18n_get(
+        "To add a second device, pair it from its Bluetooth settings while this menu is open.",
+        data);
+  }
+  if (data->remote_list_head) {
+    return pbl_i18n_get("Forget a device to pair a new device.", data);
+  }
+#else
   if (data->remote_list_head) {
     return pbl_i18n_get("Forget this device to pair a new device.", data);
   }
+#endif
   if (bt_ctl_is_airplane_mode_on()) {
     return pbl_i18n_get("Disable Airplane Mode to connect.", data);
   }
@@ -568,7 +580,8 @@ static void prv_expand_cb(SettingsCallbacks *context) {
   // Only enable pairing/advertising if there are no paired devices (single phone policy)
   data->did_enable_pairability = false;
 #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
-  // Multi-link experiment: advertise even with a paired phone, so a second device can connect.
+  // Multi-link: advertise even with a paired phone, so a secondary device can pair.
+  bt_pairability_set_secondary_pairing(true);
   if (true) {
 #else
   if (!data->remote_list_head) {
@@ -591,6 +604,9 @@ static void prv_hide_cb(SettingsCallbacks *context) {
   if (data->did_enable_pairability) {
     bt_pairability_release();
   }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  bt_pairability_set_secondary_pairing(false);
+#endif
 
 #ifdef CONFIG_SERVICE_BLE_HRM
   event_service_client_unsubscribe(&data->ble_hrm_sharing_event_info);

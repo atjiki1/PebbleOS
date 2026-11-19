@@ -25,3 +25,19 @@ int pbl_bt_gap_le_disconnect(const struct pbl_bt_device_internal *peer_address) 
 
   return rc;
 }
+
+int pbl_bt_gap_le_security_initiate(const struct pbl_bt_device_internal *peer_address) {
+  uint16_t conn_handle;
+
+  if (!pebble_device_to_nimble_conn_handle(peer_address, &conn_handle)) {
+    PBL_LOG_ERR("pbl_bt_gap_le_security_initiate: Failed to find connection handle");
+    return -1;
+  }
+
+  int rc = ble_gap_security_initiate(conn_handle);
+  if (rc != 0) {
+    PBL_LOG_ERR("ble_gap_security_initiate rc=0x%04x", (uint16_t)rc);
+  }
+
+  return rc;
+}

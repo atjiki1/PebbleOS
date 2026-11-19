@@ -507,6 +507,10 @@ void kernel_le_client_init(void) {
   if (gateway_bonding != PBL_BT_BONDING_ID_INVALID) {
     prv_connect_gateway_bonding(gateway_bonding);
   }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  gap_le_slave_reconnect_secondary_update(gap_le_connect_is_secondary_connected());
+#endif
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -515,6 +519,10 @@ void kernel_le_client_deinit(void) {
   launcher_task_add_callback(prv_cleanup_clients_kernel_main_cb, nullptr);
 
   gap_le_slave_reconnect_stop();
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  // Treat the secondary as connected to stop advertising for it.
+  gap_le_slave_reconnect_secondary_update(true /* is_secondary_connected */);
+#endif
   gap_le_connect_cancel_all();
 #if defined(CONFIG_PP_TRANSPORT_GATT)
   pbl_pp_gatt_destroy();
