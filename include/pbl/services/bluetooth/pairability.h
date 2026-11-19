@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /**
@@ -61,5 +62,22 @@ void bt_pairability_update_due_to_bonding_change(void);
  * @brief Initialize pairability when the stack starts.
  */
 void bt_pairability_init(void);
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+/**
+ * @brief Mark that a new pairing should become the secondary device.
+ *
+ * While set, a pairing made while a gateway (phone) bonding exists is stored as the secondary,
+ * notification-only device instead of replacing the phone.
+ *
+ * @param active True while the Bluetooth settings menu is open.
+ */
+void bt_pairability_set_secondary_pairing(bool active);
+
+/**
+ * @brief Check whether a new pairing should become the secondary device.
+ */
+bool bt_pairability_is_secondary_pairing(void);
+#endif
 
 /** @} */

@@ -515,6 +515,10 @@ typedef struct {
   pbl_bt_bonding_id_t keep_id;
   pbl_bt_bonding_id_t ids[BT_BONDING_PRUNE_MAX];
   uint8_t count;
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  //! Only collect bondings with this role (gateway or secondary).
+  bool is_gateway;
+#endif
 } CollectOtherBleItrData;
 
 static bool prv_collect_other_ble_bondings_itr(struct pbl_settings_file *file,
@@ -537,6 +541,12 @@ static bool prv_collect_other_ble_bondings_itr(struct pbl_settings_file *file,
     return true;
   }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (stored_data.ble_data.is_gateway != itr_data->is_gateway) {
+    return true;
+  }
+#endif
+
   if (itr_data->count < BT_BONDING_PRUNE_MAX) {
     itr_data->ids[itr_data->count++] = key;
   }
@@ -549,7 +559,72 @@ static bool prv_collect_other_ble_bondings_itr(struct pbl_settings_file *file,
 //!
 //! Uses the internal delete helper that does not erase shared PRF pairing data, since the kept
 //! entry is the one that should remain reflected in PRF storage.
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Multi-link: one gateway (phone) and one secondary bonding are kept. Delete every other BLE
+//! bonding with the same role as `keep_id`.
+static void prv_delete_other_ble_bondings_with_role(pbl_bt_bonding_id_t keep_id, bool is_gateway) {
+  CollectOtherBleItrData itr_data = {
+    .keep_id = keep_id,
+    .count = 0,
+    .is_gateway = is_gateway,
+  };
+  prv_file_each(prv_collect_other_ble_bondings_itr, &itr_data);
+
+  for (uint8_t i = 0; i < itr_data.count; i++) {
+    PBL_LOG_INFO("Removing stale BLE bonding %d (kept %d, gateway %d)", itr_data.ids[i], keep_id,
+                 is_gateway);
+    prv_delete_ble_pairing_by_id(itr_data.ids[i]);
+  }
+}
+
+typedef struct {
+  bool found;
+  struct pbl_bt_device_internal identity;
+} FindSecondaryItrData;
+
+static bool prv_find_secondary_itr(struct pbl_settings_file *file, struct pbl_settings_record *info,
+                                   void *context) {
+  if (info->val_len == 0 || info->key_len != sizeof(pbl_bt_bonding_id_t)) {
+    return true;
+  }
+
+  BtPersistBondingData stored_data;
+  pbl_settings_read_val(file, (uint8_t *)&stored_data, MIN(info->val_len, sizeof(stored_data)));
+  if (stored_data.type != BtPersistBondingTypeBLE || stored_data.ble_data.is_gateway) {
+    return true;
+  }
+
+  FindSecondaryItrData *itr_data = context;
+  itr_data->found = true;
+  itr_data->identity = stored_data.ble_data.pairing_info.identity;
+  return false;
+}
+
+//! RAM copy of the secondary bonding's identity, readable with bt_lock() held.
+static volatile bool s_has_secondary;
+static struct pbl_bt_device_internal s_secondary_identity;
+
+static void prv_refresh_secondary_cache(void) {
+  FindSecondaryItrData itr_data = {};
+  prv_file_each(prv_find_secondary_itr, &itr_data);
+  s_has_secondary = false;
+  s_secondary_identity = itr_data.identity;
+  s_has_secondary = itr_data.found;
+}
+
+bool bt_persistent_storage_has_ble_secondary_bonding(void) {
+  return s_has_secondary;
+}
+
+bool bt_persistent_storage_is_ble_secondary_device(const struct pbl_bt_device_internal *device) {
+  return s_has_secondary && bt_device_internal_equal(device, &s_secondary_identity);
+}
+#endif
+
 static void prv_delete_other_ble_bondings(pbl_bt_bonding_id_t keep_id) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_delete_other_ble_bondings_with_role(keep_id, true /* is_gateway */);
+#else
   CollectOtherBleItrData itr_data = {
     .keep_id = keep_id,
     .count = 0,
@@ -560,12 +635,17 @@ static void prv_delete_other_ble_bondings(pbl_bt_bonding_id_t keep_id) {
     PBL_LOG_INFO("Removing stale BLE bonding %d (kept %d)", itr_data.ids[i], keep_id);
     prv_delete_ble_pairing_by_id(itr_data.ids[i]);
   }
+#endif
 }
 
 typedef struct {
   pbl_bt_bonding_id_t key_out;
   uint32_t last_modified_out;
   uint8_t ble_count;
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  //! Only consider bondings with this role (gateway or secondary).
+  bool is_gateway;
+#endif
 } MostRecentBleItrData;
 
 static bool prv_find_most_recent_ble_bonding_itr(struct pbl_settings_file *file,
@@ -582,6 +662,12 @@ static bool prv_find_most_recent_ble_bonding_itr(struct pbl_settings_file *file,
     return true;
   }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (stored_data.ble_data.is_gateway != itr_data->is_gateway) {
+    return true;
+  }
+#endif
+
   pbl_bt_bonding_id_t key;
   pbl_settings_read_key(file, (uint8_t *)&key, info->key_len);
 
@@ -597,7 +683,31 @@ static bool prv_find_most_recent_ble_bonding_itr(struct pbl_settings_file *file,
 //! If the bonding DB contains multiple BLE pairings (e.g. left over from an older firmware that
 //! allowed more than one, or from a PRF pairing merged on top of an existing one), keep the most
 //! recently modified entry and drop the rest.
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static void prv_prune_stale_ble_bondings_with_role(bool is_gateway) {
+  MostRecentBleItrData itr_data = {
+    .key_out = PBL_BT_BONDING_ID_INVALID,
+    .last_modified_out = 0,
+    .ble_count = 0,
+    .is_gateway = is_gateway,
+  };
+  prv_file_each(prv_find_most_recent_ble_bonding_itr, &itr_data);
+
+  if (itr_data.ble_count <= 1 || itr_data.key_out == PBL_BT_BONDING_ID_INVALID) {
+    return;
+  }
+
+  PBL_LOG_INFO("Found %u BLE bondings at boot (gateway %d), keeping most recent (id %d)",
+               itr_data.ble_count, is_gateway, itr_data.key_out);
+  prv_delete_other_ble_bondings_with_role(itr_data.key_out, is_gateway);
+}
+#endif
+
 static void prv_prune_stale_ble_bondings(void) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_prune_stale_ble_bondings_with_role(true /* is_gateway */);
+  prv_prune_stale_ble_bondings_with_role(false /* is_gateway */);
+#else
   MostRecentBleItrData itr_data = {
     .key_out = PBL_BT_BONDING_ID_INVALID,
     .last_modified_out = 0,
@@ -612,6 +722,7 @@ static void prv_prune_stale_ble_bondings(void) {
   PBL_LOG_INFO("Found %u BLE bondings at boot, keeping most recent (id %d)", itr_data.ble_count,
                itr_data.key_out);
   prv_delete_other_ble_bondings(itr_data.key_out);
+#endif
 }
 
 //! For unit testing
@@ -642,6 +753,21 @@ pbl_bt_bonding_id_t bt_persistent_storage_store_ble_pairing(
   } else {
     // If we add any optional fields a load will have to happen here so they don't get overwritten
   }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (op == BtPersistBondingOpDidChange) {
+    // Keep the role of an existing bonding (e.g. when its keys are refreshed).
+    BtPersistBondingData existing_data;
+    if (prv_file_get(&key, sizeof(key), &existing_data, sizeof(existing_data)) &&
+        existing_data.type == BtPersistBondingTypeBLE) {
+      is_gateway = existing_data.ble_data.is_gateway;
+    }
+  } else if (is_gateway && bt_pairability_is_secondary_pairing() &&
+             bt_persistent_storage_has_ble_ancs_bonding()) {
+    PBL_LOG_INFO("Storing new bonding as secondary device");
+    is_gateway = false;
+  }
+#endif
 
   BtPersistBondingData new_data;
   new_data = (BtPersistBondingData){
@@ -674,16 +800,24 @@ pbl_bt_bonding_id_t bt_persistent_storage_store_ble_pairing(
 
   // In practice we only support a single BLE pairing at a time, so if we add a new one,
   // set ourselves as unfaithful.
-  if (op == BtPersistBondingOpDidAdd) {
+  if (op == BtPersistBondingOpDidAdd && is_gateway) {
     bt_persistent_storage_set_unfaithful(true);
   }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_refresh_secondary_cache();
+#endif
 
   prv_call_ble_bonding_change_handlers(key, op);
 
   // We only support a single BLE pairing at a time. Drop any previous BLE bonding so that
   // re-pairing with a different phone (or merging a PRF pairing) replaces the old one instead of
   // leaving it behind and forcing the user to forget it manually.
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_delete_other_ble_bondings_with_role(key, is_gateway);
+#else
   prv_delete_other_ble_bondings(key);
+#endif
 
   return key;
 }
@@ -791,14 +925,27 @@ static bool prv_delete_ble_pairing_by_id(pbl_bt_bonding_id_t bonding) {
 
   prv_remove_ble_bonding_from_backend(&deleted_data);
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_refresh_secondary_cache();
+#endif
+
   prv_call_ble_bonding_change_handlers(bonding, BtPersistBondingOpWillDelete);
   return true;
 }
 
 void bt_persistent_storage_delete_ble_pairing_by_id(pbl_bt_bonding_id_t bonding) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  // PRF only keeps the gateway pairing: leave it alone when the secondary is deleted.
+  const bool is_gateway = bt_persistent_storage_is_ble_ancs_bonding(bonding);
+#endif
   if (!prv_delete_ble_pairing_by_id(bonding)) {
     return;
   }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (!is_gateway) {
+    return;
+  }
+#endif
   // TODO: Make sure this matches what we have stored
   shared_prf_storage_erase_ble_pairing_data();
 }
@@ -1371,6 +1518,10 @@ void bt_persistent_storage_init(void) {
   // (e.g. inherited from an older firmware build, or a PRF pairing layered on an existing one).
   prv_prune_stale_ble_bondings();
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_refresh_secondary_cache();
+#endif
+
   // Load cached capability bits from flash
   prv_load_cached_system_capabilities(&s_cached_system_capabilities);
 }
@@ -1399,6 +1550,9 @@ static void prv_delete_all_pairings_itr(struct pbl_settings_file *old_file,
 void bt_persistent_storage_delete_all_pairings(void) {
   // BLE bondings go one by one, so that the host and the pairability follow.
   prv_delete_other_ble_bondings(PBL_BT_BONDING_ID_INVALID);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_delete_other_ble_bondings_with_role(PBL_BT_BONDING_ID_INVALID, false /* is_gateway */);
+#endif
 
   prv_lock();
   {
