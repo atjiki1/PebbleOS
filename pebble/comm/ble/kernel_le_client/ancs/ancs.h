@@ -79,6 +79,9 @@ void ancs_perform_action(uint32_t notification_uid, uint8_t action_id);
 void ancs_handle_ios9_or_newer_detected(void);
 
 #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Set in the UIDs of the secondary device's notifications.
+#define ANCS_SECONDARY_UID_FLAG (0x80000000UL)
+
 //! Multi-link: a second ANCS client for the secondary iOS device. Its notification UIDs are
 //! reported with the top bit set; ancs_perform_action() routes such UIDs back to it.
 void ancs_secondary_create(void);
