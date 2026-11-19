@@ -125,47 +125,11 @@ static StoredRemote *stored_remote_create(void) {
   return remote;
 }
 
-#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
-//! Copies a device name for display. Apple's logo character (U+F8FF, private use) is not in the
-//! watch fonts and would show as a box, so it is shown as U+1F34E (red apple emoji) instead.
-static void prv_copy_device_name_for_display(char *out, size_t out_size, const char *in) {
-  static const char logo[] = "\xef\xa3\xbf";
-  static const char apple[] = "\xf0\x9f\x8d\x8e";
-  size_t out_len = 0;
-  const char *cursor = in;
-  while (*cursor) {
-    const uint8_t lead = (uint8_t)*cursor;
-    size_t seq_len = (lead < 0x80) ? 1 : ((lead >> 5) == 0x6) ? 2 : ((lead >> 4) == 0xE) ? 3
-                     : ((lead >> 3) == 0x1E) ? 4 : 1;
-    if (strnlen(cursor, seq_len) < seq_len) {
-      break; // Truncated sequence
-    }
-    const char *src = cursor;
-    size_t src_len = seq_len;
-    if (seq_len == 3 && memcmp(cursor, logo, 3) == 0) {
-      src = apple;
-      src_len = 4;
-    }
-    if (out_len + src_len + 1 > out_size) {
-      break;
-    }
-    memcpy(&out[out_len], src, src_len);
-    out_len += src_len;
-    cursor += seq_len;
-  }
-  out[out_len] = '\0';
-}
-#endif
-
 static void prv_copy_device_name_with_fallback(StoredRemote *remote, const char *name) {
   if (!name || strlen(name) == 0) {
     pbl_i18n_get_with_buffer("<Untitled>", remote->name, sizeof(remote->name));
   } else {
-#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
-    prv_copy_device_name_for_display(remote->name, sizeof(remote->name), name);
-#else
     strncpy(remote->name, name, sizeof(remote->name));
-#endif
   }
 }
 
