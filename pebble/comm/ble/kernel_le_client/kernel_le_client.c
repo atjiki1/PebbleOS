@@ -185,11 +185,26 @@ static const KernelLEClient s_clients[KernelLEClientNum] = {
 #endif // UNITTEST
 };
 
-static void prv_handle_services_removed(PebbleBLEGATTClientServicesRemoved *services_removed) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT) && defined(CONFIG_BT_ANCS_CLIENT)
+//! Only the ANCS client runs on the secondary device's link.
+static bool prv_client_runs_on_device(int c, const struct pbl_bt_device_internal *device) {
+  return !gap_le_connect_is_secondary_link_device(device) || (c == KernelLEClientANCS);
+}
+#else
+static bool prv_client_runs_on_device(int c, const struct pbl_bt_device_internal *device) {
+  return true;
+}
+#endif
+
+static void prv_handle_services_removed(PebbleBLEGATTClientServicesRemoved *services_removed,
+                                        const struct pbl_bt_device_internal *device) {
   PebbleBLEGATTClientServiceHandles *service_remove_info = &services_removed->handles[0];
   for (int s = 0; s < services_removed->num_services_removed; s++) {
     for (int c = 0; c < KernelLEClientNum; c++) {
       const KernelLEClient *const client = &s_clients[c];
+      if (!prv_client_runs_on_device(c, device)) {
+        continue;
+      }
       if (uuid_equal(&service_remove_info->uuid, client->service_uuid)) {
         client->handle_service_removed(
             (pbl_bt_characteristic_t *)&service_remove_info->char_and_desc_handles[0],
@@ -203,7 +218,13 @@ static void prv_handle_services_removed(PebbleBLEGATTClientServicesRemoved *serv
   }
 }
 
-static void prv_handle_all_services_invalidated(void) {
+static void prv_handle_all_services_invalidated(const struct pbl_bt_device_internal *device) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT) && defined(CONFIG_BT_ANCS_CLIENT)
+  if (gap_le_connect_is_secondary_link_device(device)) {
+    ancs_secondary_invalidate_all_references();
+    return;
+  }
+#endif
   for (int c = 0; c < KernelLEClientNum; c++) {
     const KernelLEClient *const client = &s_clients[c];
     client->invalidate_all_references();
@@ -225,6 +246,10 @@ static void prv_handle_services_added(PebbleBLEGATTClientServicesAdded *added_se
         continue;
       }
 
+      if (!prv_client_runs_on_device(c, device)) {
+        continue;
+      }
+
       // We have found a service that a client is looking for. Make sure the
       // characteristics we want are present and if so notify the interested client about it
       pbl_bt_characteristic_t characteristics[client->num_characteristics];
@@ -238,6 +263,13 @@ static void prv_handle_services_added(PebbleBLEGATTClientServicesAdded *added_se
         continue;
       }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT) && defined(CONFIG_BT_ANCS_CLIENT)
+      if (c == KernelLEClientANCS && gap_le_connect_is_secondary_link_device(device)) {
+        PBL_LOG_INFO("Found ANCS on the secondary device");
+        ancs_secondary_handle_service_discovered(characteristics);
+        continue;
+      }
+#endif
       client->handle_service_discovered(characteristics);
     }
   }
@@ -264,10 +296,10 @@ static void prv_handle_gatt_service_discovery_event(const PebbleBLEGATTClientSer
 
   switch (event_info->type) {
     case PebbleServicesRemoved:
-      prv_handle_services_removed(&event_info->services_removed_data);
+      prv_handle_services_removed(&event_info->services_removed_data, &event_info->device);
       break;
     case PebbleServicesInvalidateAll:
-      prv_handle_all_services_invalidated();
+      prv_handle_all_services_invalidated(&event_info->device);
       break;
     case PebbleServicesAdded:
       prv_handle_services_added(&event_info->services_added_data, &event_info->device);
@@ -477,6 +509,9 @@ static void prv_connect_gateway_bonding(pbl_bt_bonding_id_t gateway_bonding) {
 static void prv_cleanup_clients_kernel_main_cb(void *unused) {
 #if defined(CONFIG_BT_ANCS_CLIENT)
   ancs_destroy();
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  ancs_secondary_destroy();
+#endif
 #endif
 #if defined(CONFIG_BT_AMS_CLIENT)
   ams_destroy();
@@ -496,6 +531,23 @@ void kernel_le_client_handle_bonding_change(pbl_bt_bonding_id_t bonding, BtPersi
     prv_connect_gateway_bonding(bonding);
   }
 }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+// -------------------------------------------------------------------------------------------------
+void kernel_le_client_handle_secondary_connection(const struct pbl_bt_device_internal *device,
+                                                  bool connected) {
+#if defined(CONFIG_BT_ANCS_CLIENT)
+  if (connected) {
+    PBL_LOG_INFO("Secondary device encrypted, looking for ANCS");
+    ancs_secondary_create();
+    gatt_client_discovery_discover_all(device);
+  } else {
+    PBL_LOG_INFO("Secondary device gone");
+    ancs_secondary_destroy();
+  }
+#endif
+}
+#endif
 
 // -------------------------------------------------------------------------------------------------
 void kernel_le_client_init(void) {
