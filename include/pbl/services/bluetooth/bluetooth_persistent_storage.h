@@ -171,6 +171,15 @@ bool bt_persistent_storage_has_ble_secondary_bonding(void);
  * @param device Identity address of the peer.
  */
 bool bt_persistent_storage_is_ble_secondary_device(const struct pbl_bt_device_internal *device);
+
+/**
+ * @brief Get the bonding id of the secondary device.
+ *
+ * Reads a RAM cache, so it can be called with bt_lock() held.
+ *
+ * @return The bonding id, or PBL_BT_BONDING_ID_INVALID if there is none.
+ */
+pbl_bt_bonding_id_t bt_persistent_storage_get_ble_secondary_bonding(void);
 #endif
 
 /**
