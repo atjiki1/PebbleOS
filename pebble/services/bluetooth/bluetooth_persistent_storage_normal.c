@@ -632,6 +632,7 @@ static void prv_delete_other_ble_bondings_with_role(pbl_bt_bonding_id_t keep_id,
 
 typedef struct {
   bool found;
+  pbl_bt_bonding_id_t key;
   struct pbl_bt_device_internal identity;
 } FindSecondaryItrData;
 
@@ -649,6 +650,7 @@ static bool prv_find_secondary_itr(struct pbl_settings_file *file, struct pbl_se
 
   FindSecondaryItrData *itr_data = context;
   itr_data->found = true;
+  pbl_settings_read_key(file, (uint8_t *)&itr_data->key, info->key_len);
   itr_data->identity = stored_data.ble_data.pairing_info.identity;
   return false;
 }
@@ -656,13 +658,21 @@ static bool prv_find_secondary_itr(struct pbl_settings_file *file, struct pbl_se
 //! RAM copy of the secondary bonding's identity, readable with bt_lock() held.
 static volatile bool s_has_secondary;
 static struct pbl_bt_device_internal s_secondary_identity;
+static pbl_bt_bonding_id_t s_secondary_bonding_id = PBL_BT_BONDING_ID_INVALID;
 
 static void prv_refresh_secondary_cache(void) {
-  FindSecondaryItrData itr_data = {};
+  FindSecondaryItrData itr_data = {
+    .key = PBL_BT_BONDING_ID_INVALID,
+  };
   prv_file_each(prv_find_secondary_itr, &itr_data);
   s_has_secondary = false;
   s_secondary_identity = itr_data.identity;
+  s_secondary_bonding_id = itr_data.found ? itr_data.key : PBL_BT_BONDING_ID_INVALID;
   s_has_secondary = itr_data.found;
+}
+
+pbl_bt_bonding_id_t bt_persistent_storage_get_ble_secondary_bonding(void) {
+  return s_has_secondary ? s_secondary_bonding_id : PBL_BT_BONDING_ID_INVALID;
 }
 
 bool bt_persistent_storage_has_ble_secondary_bonding(void) {

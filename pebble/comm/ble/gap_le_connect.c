@@ -426,6 +426,16 @@ void pbl_bt_handle_le_connection_complete_event(const struct pbl_bt_conn_complet
       connection->conn_params = *params;
       connection->gatt_mtu = event->mtu;
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+      if (!local_is_master && event->handle == s_secondary_slave_handle &&
+          bt_persistent_storage_is_ble_secondary_device(&event->peer_address)) {
+        // No intent tracks the secondary device: link its bonding here, so that e.g. its device
+        // name can be stored.
+        connection->bonding_id = bt_persistent_storage_get_ble_secondary_bonding();
+        connection->is_gateway = false;
+      }
+#endif
+
       bool found_match = false;
       GAPLEConnectionIntent *intent = s_intents;
       while (intent) {
