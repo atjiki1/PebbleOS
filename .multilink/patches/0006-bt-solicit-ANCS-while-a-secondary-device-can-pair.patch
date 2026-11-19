@@ -1,0 +1,110 @@
+From 73b0289a15cbcd83674fee129dce83bbf6f6ca95 Mon Sep 17 00:00:00 2001
+From: atjiki1 <atjiki1@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 23:24:37 +0900
+Subject: [PATCH 6/8] bt: solicit ANCS while a secondary device can pair
+
+iOS lists a generic accessory under Settings > Bluetooth > Other Devices
+only when it solicits a system service, so a new iPad could not find the
+watch without a scanner app.
+
+With CONFIG_BT_MULTI_LINK_EXPERIMENT, while secondary pairing is on and
+a phone is bonded, advertise flags, the Pebble Pairing Service UUID and
+the ANCS service solicitation UUID, with the name in the scan response.
+
+Assisted-by: LLM
+---
+ pebble/comm/ble/gap_le_slave_discovery.c | 65 ++++++++++++++++++++++++
+ 1 file changed, 65 insertions(+)
+
+diff --git a/pebble/comm/ble/gap_le_slave_discovery.c b/pebble/comm/ble/gap_le_slave_discovery.c
+index 8fe6b65..acd62c1 100644
+--- a/pebble/comm/ble/gap_le_slave_discovery.c
++++ b/pebble/comm/ble/gap_le_slave_discovery.c
+@@ -22,6 +22,14 @@
+ #include <mfg/mfg_serials.h>
+ #include <system/version.h>
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++#include <string.h>
++
++#include <pbl/kernel/malloc.h>
++#include <pbl/services/bluetooth/bluetooth_persistent_storage.h>
++#include <pbl/services/bluetooth/pairability.h>
++#endif
++
+ static GAPLEAdvertisingJobRef s_discovery_advert_job;
+ 
+ // -----------------------------------------------------------------------------
+@@ -31,12 +39,69 @@ static void prv_job_unschedule_callback(GAPLEAdvertisingJobRef job, bool complet
+   s_discovery_advert_job = nullptr;
+ }
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++// -----------------------------------------------------------------------------
++//! Payload used while a secondary device can pair (Bluetooth settings open, phone bonded). iOS
++//! only lists generic accessories in Settings > Bluetooth when they solicit a system service, so
++//! solicit ANCS next to the Pebble Pairing Service. The name goes in the scan response.
++static struct pbl_bt_ad_data *prv_create_secondary_pairing_ad(void) {
++  static const uint8_t s_ad[] = {
++    // Flags: LE General Discoverable, BR/EDR Not Supported
++    0x02, 0x01, 0x06,
++    // Incomplete list of 16-bit Service UUIDs: Pebble Pairing Service
++    0x03, 0x02, (uint8_t)(PBL_BT_PPS_UUID_16BIT & 0xFF), (uint8_t)(PBL_BT_PPS_UUID_16BIT >> 8),
++    // List of 128-bit Service Solicitation UUIDs: ANCS 7905F431-B5CE-4E99-A40F-4B1E122D00D0
++    0x11, 0x15, 0xD0, 0x00, 0x2D, 0x12, 0x1E, 0x4B, 0x0F, 0xA4, 0x99, 0x4E, 0xCE, 0xB5, 0x31,
++    0xF4, 0x05, 0x79,
++  };
++
++  char device_name[PBL_BT_DEVICE_NAME_BUFFER_SIZE];
++  bt_local_id_copy_device_name(device_name, true);
++  size_t name_len = strlen(device_name);
++  const size_t max_name_len = PBL_BT_AD_REPORT_DATA_MAX_LENGTH - 2;
++  const bool is_shortened = (name_len > max_name_len);
++  if (is_shortened) {
++    name_len = max_name_len;
++  }
++
++  const size_t scan_resp_len = name_len ? (2 + name_len) : 0;
++  struct pbl_bt_ad_data *ad = pbl_malloc_check(sizeof(*ad) + sizeof(s_ad) + scan_resp_len);
++  ad->ad_data_length = sizeof(s_ad);
++  ad->scan_resp_data_length = scan_resp_len;
++  memcpy(ad->data, s_ad, sizeof(s_ad));
++  if (name_len) {
++    uint8_t *scan_resp = &ad->data[sizeof(s_ad)];
++    scan_resp[0] = name_len + 1;
++    scan_resp[1] = is_shortened ? 0x08 /* Shortened Local Name */ : 0x09 /* Complete Local Name */;
++    memcpy(&scan_resp[2], device_name, name_len);
++  }
++  return ad;
++}
++#endif
++
+ // -----------------------------------------------------------------------------
+ //! Schedules the discovery advertisement job.
+ //! We don't want to be advertising at a high rate infinitely. When duration
+ //! is 0, a short period of high-rate advertising will be used. When this short
+ //! period is completed, an indefinite, low-rate job will be scheduled.
+ static void prv_schedule_ad_job(void) {
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  if (bt_pairability_is_secondary_pairing() && bt_persistent_storage_has_ble_ancs_bonding()) {
++    struct pbl_bt_ad_data *secondary_ad = prv_create_secondary_pairing_ad();
++    const GAPLEAdvertisingJobTerm secondary_terms[] = {
++      {
++        .duration_secs = GAPLE_ADVERTISING_DURATION_INFINITE,
++        .interval = GAPLEAdvertisingInterval_Short,
++      },
++    };
++    s_discovery_advert_job = gap_le_advert_schedule(secondary_ad, secondary_terms,
++                                                    ARRAY_LENGTH(secondary_terms),
++                                                    prv_job_unschedule_callback, nullptr,
++                                                    GAPLEAdvertisingJobTagDiscovery);
++    pbl_free(secondary_ad);
++    return;
++  }
++#endif
+   struct pbl_bt_ad_data *ad = ble_ad_create();
+ 
+   // Advertisement part:
+-- 
+2.43.0
+

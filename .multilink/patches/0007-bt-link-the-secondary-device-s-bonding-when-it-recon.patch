@@ -1,0 +1,110 @@
+From f065a569ef9006acc3ca1727c0e0218b70dd1cdd Mon Sep 17 00:00:00 2001
+From: atjiki1 <atjiki1@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 00:22:43 +0900
+Subject: [PATCH 7/8] bt: link the secondary device's bonding when it
+ reconnects
+
+A connection only gets its bonding id from a matching intent, and no
+intent tracks the secondary device. After a reconnection its link had
+no bonding id, so a new device name fetched from the Bluetooth settings
+menu was dropped and the old name stayed.
+
+Cache the secondary bonding id next to its identity and assign it, with
+is_gateway = false, when the secondary device's link comes up.
+
+Assisted-by: LLM
+---
+ .../bluetooth/bluetooth_persistent_storage.h         |  9 +++++++++
+ pebble/comm/ble/gap_le_connect.c                     | 10 ++++++++++
+ .../bluetooth/bluetooth_persistent_storage_normal.c  | 12 +++++++++++-
+ 3 files changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/include/pbl/services/bluetooth/bluetooth_persistent_storage.h b/include/pbl/services/bluetooth/bluetooth_persistent_storage.h
+index 97a60b1..c3b56ce 100644
+--- a/include/pbl/services/bluetooth/bluetooth_persistent_storage.h
++++ b/include/pbl/services/bluetooth/bluetooth_persistent_storage.h
+@@ -171,6 +171,15 @@ bool bt_persistent_storage_has_ble_secondary_bonding(void);
+  * @param device Identity address of the peer.
+  */
+ bool bt_persistent_storage_is_ble_secondary_device(const struct pbl_bt_device_internal *device);
++
++/**
++ * @brief Get the bonding id of the secondary device.
++ *
++ * Reads a RAM cache, so it can be called with bt_lock() held.
++ *
++ * @return The bonding id, or PBL_BT_BONDING_ID_INVALID if there is none.
++ */
++pbl_bt_bonding_id_t bt_persistent_storage_get_ble_secondary_bonding(void);
+ #endif
+ 
+ /**
+diff --git a/pebble/comm/ble/gap_le_connect.c b/pebble/comm/ble/gap_le_connect.c
+index 132e621..64a3ed2 100644
+--- a/pebble/comm/ble/gap_le_connect.c
++++ b/pebble/comm/ble/gap_le_connect.c
+@@ -426,6 +426,16 @@ void pbl_bt_handle_le_connection_complete_event(const struct pbl_bt_conn_complet
+       connection->conn_params = *params;
+       connection->gatt_mtu = event->mtu;
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++      if (!local_is_master && event->handle == s_secondary_slave_handle &&
++          bt_persistent_storage_is_ble_secondary_device(&event->peer_address)) {
++        // No intent tracks the secondary device: link its bonding here, so that e.g. its device
++        // name can be stored.
++        connection->bonding_id = bt_persistent_storage_get_ble_secondary_bonding();
++        connection->is_gateway = false;
++      }
++#endif
++
+       bool found_match = false;
+       GAPLEConnectionIntent *intent = s_intents;
+       while (intent) {
+diff --git a/pebble/services/bluetooth/bluetooth_persistent_storage_normal.c b/pebble/services/bluetooth/bluetooth_persistent_storage_normal.c
+index 6e7aeea..53773be 100644
+--- a/pebble/services/bluetooth/bluetooth_persistent_storage_normal.c
++++ b/pebble/services/bluetooth/bluetooth_persistent_storage_normal.c
+@@ -579,6 +579,7 @@ static void prv_delete_other_ble_bondings_with_role(pbl_bt_bonding_id_t keep_id,
+ 
+ typedef struct {
+   bool found;
++  pbl_bt_bonding_id_t key;
+   struct pbl_bt_device_internal identity;
+ } FindSecondaryItrData;
+ 
+@@ -596,6 +597,7 @@ static bool prv_find_secondary_itr(struct pbl_settings_file *file, struct pbl_se
+ 
+   FindSecondaryItrData *itr_data = context;
+   itr_data->found = true;
++  pbl_settings_read_key(file, (uint8_t *)&itr_data->key, info->key_len);
+   itr_data->identity = stored_data.ble_data.pairing_info.identity;
+   return false;
+ }
+@@ -603,15 +605,23 @@ static bool prv_find_secondary_itr(struct pbl_settings_file *file, struct pbl_se
+ //! RAM copy of the secondary bonding's identity, readable with bt_lock() held.
+ static volatile bool s_has_secondary;
+ static struct pbl_bt_device_internal s_secondary_identity;
++static pbl_bt_bonding_id_t s_secondary_bonding_id = PBL_BT_BONDING_ID_INVALID;
+ 
+ static void prv_refresh_secondary_cache(void) {
+-  FindSecondaryItrData itr_data = {};
++  FindSecondaryItrData itr_data = {
++    .key = PBL_BT_BONDING_ID_INVALID,
++  };
+   prv_file_each(prv_find_secondary_itr, &itr_data);
+   s_has_secondary = false;
+   s_secondary_identity = itr_data.identity;
++  s_secondary_bonding_id = itr_data.found ? itr_data.key : PBL_BT_BONDING_ID_INVALID;
+   s_has_secondary = itr_data.found;
+ }
+ 
++pbl_bt_bonding_id_t bt_persistent_storage_get_ble_secondary_bonding(void) {
++  return s_has_secondary ? s_secondary_bonding_id : PBL_BT_BONDING_ID_INVALID;
++}
++
+ bool bt_persistent_storage_has_ble_secondary_bonding(void) {
+   return s_has_secondary;
+ }
+-- 
+2.43.0
+

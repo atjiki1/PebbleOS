@@ -1,0 +1,366 @@
+From fec8e8b1df74b1d796358247988e164479cbfb43 Mon Sep 17 00:00:00 2001
+From: harry <harry@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 23:21:01 +0900
+Subject: [PATCH 1/8] bt: multi-link experiment for a second BLE device
+
+Add CONFIG_BT_MULTI_LINK_EXPERIMENT (default n) to check whether the
+SF32LB52 controller accepts a second concurrent LE link while the phone
+stays connected:
+
+- NimBLE link limit 2 when enabled
+- Settings > Bluetooth keeps advertising while open, even when paired
+- count slave links; legacy connection events and "connected as slave"
+  follow the first (primary) link only
+- double vibe when a second link connects, short vibe when it drops
+- pairing is rejected on a second link so the phone bonding is kept
+
+Also add a workflow that builds obelix with the option enabled.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HAHM7gDhkyC1bGnnk4KWyY
+---
+ .github/workflows/build-multilink.yml   | 87 +++++++++++++++++++++++++
+ pebble/apps/system/settings/bluetooth.c | 11 ++++
+ pebble/comm/ble/gap_le_connect.c        | 68 +++++++++++++++++++
+ pebble/comm/ble/gap_le_connect.h        |  5 ++
+ pebble/popups/bluetooth_pairing_ui.c    | 12 ++++
+ pebble/services/bluetooth/Kconfig       | 11 ++++
+ subsys/bluetooth/Kconfig.defconfig      |  4 ++
+ 7 files changed, 198 insertions(+)
+ create mode 100644 .github/workflows/build-multilink.yml
+
+diff --git a/.github/workflows/build-multilink.yml b/.github/workflows/build-multilink.yml
+new file mode 100644
+index 0000000..fd9c95d
+--- /dev/null
++++ b/.github/workflows/build-multilink.yml
+@@ -0,0 +1,87 @@
++name: Build Multi-link Experiment
++
++# pebble-sync+2: builds Pebble Time 2 (obelix) firmware with
++# CONFIG_BT_MULTI_LINK_EXPERIMENT=y and uploads the .pbz bundle.
++
++on:
++  push:
++    branches: [multi-link-experiment]
++  workflow_dispatch:
++
++jobs:
++  build:
++    runs-on: ubuntu-24.04
++
++    container:
++      image: ghcr.io/coredevices/pebbleos-docker:v16
++
++    strategy:
++      fail-fast: false
++      matrix:
++        board:
++          - obelix@pvt
++          - obelix@dvt
++        slot:
++          - 0
++          - 1
++
++    steps:
++      - name: Mark Github workspace as safe
++        run: git config --system --add safe.directory "${GITHUB_WORKSPACE}"
++
++      - name: Checkout
++        uses: actions/checkout@v7
++        with:
++          fetch-depth: 0
++
++      - name: Fetch tags
++        run: git fetch --tags --force
++
++      - name: Submodules
++        uses: ./.github/actions/rebase
++        with:
++          submodules: true
++
++      - name: Install Python dependencies
++        run: |
++          pip install -U pip
++          pip install -r requirements.txt
++
++      - name: Set names
++        id: names
++        env:
++          BOARD: ${{ matrix.board }}
++        run: |
++          echo "BOARD=$(printf '%s' "$BOARD" | tr @ _)" >> "$GITHUB_OUTPUT"
++
++      - name: Configure
++        run: >
++          pbl configure --board '${{ matrix.board }}'
++          -DCONFIG_FIRMWARE_SLOT=${{ matrix.slot }}
++          -DCONFIG_RELEASE=y
++          -DCONFIG_BT_MULTI_LINK_EXPERIMENT=y
++
++      - name: Check config
++        run: |
++          grep -E 'CONFIG_BT_MULTI_LINK_EXPERIMENT|CONFIG_NIMBLE_BLE_MAX_CONNECTIONS' -r build --include='.config' --include='*.conf' --include='autoconf.h' | head -20 || true
++
++      - name: Build
++        run: pbl build
++
++      - name: Bundle
++        run: pbl bundle
++
++      - name: Copy artifacts
++        env:
++          BOARD: ${{ steps.names.outputs.BOARD }}
++        run: |
++          mkdir artifacts
++          cp build/normal_${BOARD}_*.pbz artifacts/
++          cp build/pebbleos.elf "artifacts/firmware_${BOARD}_slot${{ matrix.slot }}.elf"
++          cp build/log.dict.json "artifacts/firmware_${BOARD}_slot${{ matrix.slot }}_loghash_dict.json"
++
++      - name: Store
++        uses: actions/upload-artifact@v7
++        with:
++          name: multilink-${{ steps.names.outputs.BOARD }}_slot${{ matrix.slot }}
++          path: artifacts
+diff --git a/pebble/apps/system/settings/bluetooth.c b/pebble/apps/system/settings/bluetooth.c
+index d66a826..5061ab9 100644
+--- a/pebble/apps/system/settings/bluetooth.c
++++ b/pebble/apps/system/settings/bluetooth.c
+@@ -226,6 +226,11 @@ static void prv_settings_bluetooth_event_handler(PebbleEvent *event, void *conte
+       settings_bluetooth_update_remotes_private(settings_data);
+       bool has_remotes = (settings_data->remote_list_head != nullptr);
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++      // Multi-link experiment: keep advertising for as long as this menu is open.
++      (void)had_remotes;
++      (void)has_remotes;
++#else
+       // Handle single phone pairing policy: enable/disable advertising based on pairing state
+       if (had_remotes && !has_remotes) {
+         // Device was removed, enable advertising
+@@ -242,6 +247,7 @@ static void prv_settings_bluetooth_event_handler(PebbleEvent *event, void *conte
+           PBL_LOG_INFO("Disabled advertising - device paired");
+         }
+       }
++#endif
+ 
+       settings_menu_reload_data(SettingsMenuItemBluetooth);
+       break;
+@@ -561,7 +567,12 @@ static void prv_expand_cb(SettingsCallbacks *context) {
+ 
+   // Only enable pairing/advertising if there are no paired devices (single phone policy)
+   data->did_enable_pairability = false;
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  // Multi-link experiment: advertise even with a paired phone, so a second device can connect.
++  if (true) {
++#else
+   if (!data->remote_list_head) {
++#endif
+     bt_pairability_use();
+     data->did_enable_pairability = true;
+   }
+diff --git a/pebble/comm/ble/gap_le_connect.c b/pebble/comm/ble/gap_le_connect.c
+index 5eca8ef..27c56b3 100644
+--- a/pebble/comm/ble/gap_le_connect.c
++++ b/pebble/comm/ble/gap_le_connect.c
+@@ -22,6 +22,11 @@
+ #include <comm/bt_lock.h>
+ #include <kernel/events.h>
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++#include <applib/ui/vibes.h>
++#include <kernel/event_loop.h>
++#endif
++
+ PBL_LOG_MODULE_DECLARE(bt, CONFIG_BT_LOG_LEVEL);
+ 
+ //! About this module
+@@ -111,6 +116,23 @@ static bool s_has_pending_create_connection;
+ //! True if the device is currently connected as LE Slave (4.0)
+ static bool s_is_connected_as_slave;
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++#define GAP_LE_INVALID_CONN_HANDLE (0xFFFF)
++//! Number of links on which the local device is LE Slave.
++static uint8_t s_num_slave_links;
++//! Handle of the first slave link: legacy connection events are only sent for this one, so the
++//! rest of the system keeps seeing a single phone.
++static uint16_t s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
++
++static void prv_multi_link_vibe_kernel_main_cb(void *data) {
++  if ((uintptr_t)data) {
++    vibes_double_pulse();
++  } else {
++    vibes_short_pulse();
++  }
++}
++#endif
++
+ //! Role switching is not implemented: always act as slave (never perform LE Create Connection).
+ static const GAPLERole s_current_role = GAPLERoleSlave;
+ 
+@@ -309,7 +331,19 @@ void pbl_bt_handle_le_connection_complete_event(const struct pbl_bt_conn_complet
+         s_is_connected_as_slave = true;
+         gap_le_advert_handle_connect_as_slave();
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++        s_num_slave_links++;
++        PBL_LOG_INFO("Multi-link: slave link up hdl=%u, links=%u", event->handle,
++                     s_num_slave_links);
++        if (s_primary_slave_handle == GAP_LE_INVALID_CONN_HANDLE) {
++          s_primary_slave_handle = event->handle;
++          prv_put_legacy_connection_event(&event->peer_address, true /* connected */);
++        } else {
++          launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)1);
++        }
++#else
+         prv_put_legacy_connection_event(&event->peer_address, true /* connected */);
++#endif
+       }
+ 
+       if (gap_le_connection_is_connected(&event->peer_address)) {
+@@ -425,10 +459,28 @@ void pbl_bt_handle_le_disconnection_complete_event(
+                                                                 &connection->remote_version_info);
+ 
+       if (!local_is_master) {
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++        if (s_num_slave_links > 0) {
++          s_num_slave_links--;
++        }
++        PBL_LOG_INFO("Multi-link: slave link down hdl=%u, links=%u", event->handle,
++                     s_num_slave_links);
++        if (event->handle == s_primary_slave_handle) {
++          s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
++          prv_put_legacy_connection_event(&event->peer_address, false /* disconnected */);
++        } else {
++          launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)0);
++        }
++        // "Connected as slave" follows the primary link only, so that reconnection advertising
++        // for the phone still starts while a second device stays connected.
++        s_is_connected_as_slave = (s_primary_slave_handle != GAP_LE_INVALID_CONN_HANDLE);
++        gap_le_advert_handle_disconnect_as_slave();
++#else
+         s_is_connected_as_slave = false;
+         gap_le_advert_handle_disconnect_as_slave();
+ 
+         prv_put_legacy_connection_event(&event->peer_address, false /* disconnected */);
++#endif
+       }
+ 
+       GAPLEConnectionIntent *intent = s_intents;
+@@ -934,6 +986,18 @@ bool gap_le_connect_is_connected_as_slave(void) {
+   return connected;
+ }
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++uint8_t gap_le_connect_num_slave_links(void) {
++  uint8_t num;
++  bt_lock();
++  {
++    num = s_num_slave_links;
++  }
++  bt_unlock();
++  return num;
++}
++#endif
++
+ // -------------------------------------------------------------------------------------------------
+ 
+ void gap_le_connect_init(void) {
+@@ -974,6 +1038,10 @@ void gap_le_connect_deinit(void) {
+       bluetooth_analytics_handle_disconnect(false);
+       s_is_connected_as_slave = false;
+     }
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++    s_num_slave_links = 0;
++    s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
++#endif
+   }
+   bt_unlock();
+ }
+diff --git a/pebble/comm/ble/gap_le_connect.h b/pebble/comm/ble/gap_le_connect.h
+index 9e98c41..c359645 100644
+--- a/pebble/comm/ble/gap_le_connect.h
++++ b/pebble/comm/ble/gap_le_connect.h
+@@ -26,6 +26,11 @@ void gap_le_connect_deinit(void);
+ 
+ bool gap_le_connect_is_connected_as_slave(void);
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++//! Number of links on which the local device is currently LE Slave.
++uint8_t gap_le_connect_num_slave_links(void);
++#endif
++
+ void gap_le_connect_handle_bonding_change(pbl_bt_bonding_id_t bonding, BtPersistBondingOp op);
+ 
+ enum pbl_bt_errno gap_le_connect_connect(const struct pbl_bt_device_internal *device,
+diff --git a/pebble/popups/bluetooth_pairing_ui.c b/pebble/popups/bluetooth_pairing_ui.c
+index 72374d3..6a56d00 100644
+--- a/pebble/popups/bluetooth_pairing_ui.c
++++ b/pebble/popups/bluetooth_pairing_ui.c
+@@ -25,6 +25,9 @@
+ #include <applib/ui/window_private.h>
+ #include <applib/ui/window_stack.h>
+ #include <comm/bt_lock.h>
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++#include <comm/ble/gap_le_connect.h>
++#endif
+ #include <kernel/event_loop.h>
+ #include <kernel/events.h>
+ #include <kernel/pebble_tasks.h>
+@@ -651,6 +654,15 @@ static void prv_copy_string_and_move_cursor(const char *in_str, char **out_str,
+ void pbl_bt_cb_pairing_confirm_handle_request(const struct pbl_bt_pairing_confirm_ctx *ctx,
+                                               const char *device_name,
+                                               const char *confirmation_token) {
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  // Multi-link experiment: never pair over a second link. Storing a second bonding would replace
++  // the phone's bonding (single BLE bonding policy).
++  if (gap_le_connect_num_slave_links() > 1) {
++    PBL_LOG_WRN("Multi-link: rejecting pairing on a second link");
++    pbl_bt_pairing_confirm(ctx, false /* is_confirmed */);
++    return;
++  }
++#endif
+   // events.c clean-up (see event_deinit) can only clean up one associated heap allocation,
+   // so put everything in a single buffer:
+   size_t device_name_len = device_name ? (strlen(device_name) + 1) : 0;
+diff --git a/pebble/services/bluetooth/Kconfig b/pebble/services/bluetooth/Kconfig
+index e0fb63e..7358cb6 100644
+--- a/pebble/services/bluetooth/Kconfig
++++ b/pebble/services/bluetooth/Kconfig
+@@ -23,6 +23,17 @@ config BLE_GATT_SUBSCRIPTION_DEPTH
+       Per-client GATT subscription buffer depth, in max-size notifications.
+       Deeper absorbs notification bursts (fewer drops) at the cost of RAM.
+ 
++config BT_MULTI_LINK_EXPERIMENT
++    bool "Experimental: accept a second BLE link"
++    default n
++    depends on !RECOVERY_FW
++    help
++      Experiment for multi-device support. Raises the NimBLE link limit to 2,
++      keeps advertising while Settings > Bluetooth is open even with a paired
++      phone, and vibrates (double pulse) when a second device connects, short
++      pulse when it disconnects. The second link is never paired and gets no
++      ANCS/AMS/PPoGATT: it only shows whether the controller accepts it.
++
+ config BT_ANCS_CLIENT
+     bool "ANCS (Apple Notification Center Service) client"
+     default y if !RECOVERY_FW
+diff --git a/subsys/bluetooth/Kconfig.defconfig b/subsys/bluetooth/Kconfig.defconfig
+index 89a4fc5..13b4ce1 100644
+--- a/subsys/bluetooth/Kconfig.defconfig
++++ b/subsys/bluetooth/Kconfig.defconfig
+@@ -13,6 +13,10 @@ choice NIMBLE_BLE_TRANSPORT_LL_CHOICE
+     default NIMBLE_BLE_TRANSPORT_LL_CUSTOM
+ endchoice
+ 
++# Multi-link experiment: allow a second concurrent link.
++config NIMBLE_BLE_MAX_CONNECTIONS
++    default 2 if BT_MULTI_LINK_EXPERIMENT
++
+ # The largest MTU that fits one 251-byte LL PDU, with its 4-byte L2CAP header.
+ config NIMBLE_BLE_ATT_PREFERRED_MTU
+     default 247
+-- 
+2.43.0
+

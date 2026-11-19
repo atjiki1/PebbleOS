@@ -1,0 +1,219 @@
+name: Multi-link Release
+
+# pebble-sync+2: once a day, look for a new official PebbleOS release, apply
+# the multi-link patches in .multilink/patches on top of it, build the
+# firmware with CONFIG_BT_MULTI_LINK_EXPERIMENT=y and publish it as the
+# release "<tag>-multilink". Bark notifications use the BARK_KEY secret.
+
+on:
+  # Changing the patches or this workflow rebuilds the latest release.
+  push:
+    branches: [main]
+    paths:
+      - ".multilink/**"
+      - ".github/workflows/multilink-release.yml"
+  schedule:
+    # 06:17 KST
+    - cron: "17 21 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Official tag to build on (empty: latest vX.Y.Z)"
+        required: false
+        default: ""
+      force:
+        description: "Build again even if the release exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: multilink-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/coredevices/PebbleOS
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.find.outputs.tag }}
+      release: ${{ steps.find.outputs.release }}
+      build: ${{ steps.find.outputs.build }}
+    steps:
+      - name: Find the official release
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ github.event_name == 'push' || inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="${INPUT_TAG}"
+          else
+            tag=$(git ls-remote --tags --refs "${UPSTREAM}" | awk '{print $2}' |
+                  sed 's#refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          fi
+          release="${tag}-multilink"
+          build=true
+          if gh release view "${release}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1 &&
+             [ "${FORCE:-false}" != "true" ]; then
+            build=false
+          fi
+          echo "Official: ${tag}, release: ${release}, build: ${build}"
+          {
+            echo "tag=${tag}"
+            echo "release=${release}"
+            echo "build=${build}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+
+    container:
+      image: ghcr.io/coredevices/pebbleos-docker:v16
+
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - obelix@pvt
+          - obelix@dvt
+          - getafix@dvt2
+          - getafix@dvt
+
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      RELEASE: ${{ needs.check.outputs.release }}
+      BOARD: ${{ matrix.board }}
+
+    steps:
+      - name: Checkout patches
+        uses: actions/checkout@v7
+        with:
+          path: multilink
+
+      - name: Check out the official release
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          git clone --depth 1 --branch "${TAG}" "${UPSTREAM}" src
+
+      - name: Apply the multi-link patches
+        working-directory: src
+        run: |
+          set -euo pipefail
+          git config user.name "multilink"
+          git config user.email "multilink@users.noreply.github.com"
+          if ! git am -3 ../multilink/.multilink/patches/*.patch; then
+            git am --abort || true
+            echo "::error::The multi-link patches do not apply to ${TAG}"
+            exit 1
+          fi
+          # Firmware version: the official one with a -multilink suffix.
+          git tag -a "${RELEASE}" -m "${RELEASE}"
+          git describe
+          git log --oneline -9
+
+      - name: Submodules
+        working-directory: src
+        run: git submodule update --init --depth 1 --jobs 8
+
+      - name: Install Python dependencies
+        working-directory: src
+        run: |
+          pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Configure
+        working-directory: src
+        run: >
+          pbl configure --board "${BOARD}"
+          -DCONFIG_FIRMWARE_SLOT=0
+          -DCONFIG_RELEASE=y
+          -DCONFIG_BT_MULTI_LINK_EXPERIMENT=y
+
+      - name: Build
+        working-directory: src
+        run: pbl build
+
+      - name: Bundle
+        working-directory: src
+        run: pbl bundle
+
+      - name: Collect
+        id: collect
+        working-directory: src
+        run: |
+          set -euo pipefail
+          name=$(printf '%s' "${BOARD}" | tr @ _)
+          mkdir -p ../out
+          cp build/normal_${name}_*.pbz ../out/
+          ls -l ../out
+          echo "name=${name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Store
+        uses: actions/upload-artifact@v7
+        with:
+          name: multilink-${{ steps.collect.outputs.name }}
+          path: out
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.check.outputs.tag }}
+      RELEASE: ${{ needs.check.outputs.release }}
+      BARK_KEY: ${{ secrets.BARK_KEY }}
+    steps:
+      - name: Download
+        uses: actions/download-artifact@v8
+        with:
+          pattern: multilink-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          ls -l artifacts
+          notes="Official ${TAG} with the multi-link patches (iPhone + secondary iPad).
+
+          Pebble Time 2: normal_obelix_pvt_*.pbz (retail), obelix_dvt for DVT units.
+          Pebble Round 2: getafix_*.pbz (not tested on a watch yet).
+
+          Install: Pebble app > Devices > watch > Firmware Update Debug > Sideload FW.
+          Do not take the official update the app offers: it replaces this firmware."
+          if gh release view "${RELEASE}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE}" artifacts/*.pbz --clobber -R "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${RELEASE}" artifacts/*.pbz -R "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" --title "${RELEASE}" --notes "${notes}"
+          fi
+
+      - name: Notify (Bark)
+        if: env.BARK_KEY != ''
+        run: |
+          body=$(python3 -c 'import json,os; print(json.dumps({"device_key": os.environ["BARK_KEY"], "title": "Pebble 새 펌웨어", "body": os.environ["RELEASE"] + " 준비됨. GitHub Releases에서 받아 사이드로드하세요.", "group": "pebble-multilink", "url": "https://github.com/" + os.environ["GITHUB_REPOSITORY"] + "/releases/tag/" + os.environ["RELEASE"]}))')
+          curl -sS -X POST https://api.day.app/push -H 'Content-Type: application/json; charset=utf-8' -d "${body}" > /dev/null
+
+  notify-failure:
+    needs: [check, build, release]
+    if: failure()
+    runs-on: ubuntu-24.04
+    env:
+      BARK_KEY: ${{ secrets.BARK_KEY }}
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - name: Notify (Bark)
+        if: env.BARK_KEY != ''
+        run: |
+          body=$(python3 -c 'import json,os; print(json.dumps({"device_key": os.environ["BARK_KEY"], "title": "Pebble 펌웨어 빌드 실패", "body": (os.environ.get("TAG") or "?") + "에 multi-link 패치 적용 또는 빌드 실패. 확인이 필요합니다.", "group": "pebble-multilink", "url": "https://github.com/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"]}))')
+          curl -sS -X POST https://api.day.app/push -H 'Content-Type: application/json; charset=utf-8' -d "${body}" > /dev/null

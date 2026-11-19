@@ -1,0 +1,484 @@
+From 60931af1f6e0bb4ecd8305b9e783632a2ee8fb2d Mon Sep 17 00:00:00 2001
+From: atjiki1 <atjiki1@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 21:45:27 +0900
+Subject: [PATCH 3/8] bt: pair and reconnect a secondary device
+
+With CONFIG_BT_MULTI_LINK_EXPERIMENT:
+
+- Settings > Bluetooth turns on secondary pairing while open. A new,
+  unbonded device that connects then while a phone is bonded is treated
+  as the secondary device: the watch sends a Security Request so it
+  pairs, and the pairing is no longer rejected on a second link.
+- Links are tracked as primary (phone), secondary or extra. Only the
+  primary drives legacy connection events and "connected as slave".
+- Advertising for the secondary runs while it is bonded and not
+  connected, also while the phone is connected. After a link comes up,
+  the remaining advertising jobs are restarted while another link can
+  still be accepted.
+- Forgetting the secondary while connected drops its link.
+- The settings hint explains how to add a second device.
+- bonding.c reports the role the storage chose to the connection.
+
+Add pbl_bt_gap_le_security_initiate() to the NimBLE glue.
+
+Assisted-by: LLM
+---
+ include/pbl/bluetooth/gap_le_connect.h        | 12 +++
+ pebble/apps/system/settings/bluetooth.c       | 18 +++-
+ pebble/comm/ble/gap_le_connect.c              | 92 +++++++++++++++++--
+ pebble/comm/ble/gap_le_connect.h              |  3 +
+ pebble/comm/ble/gap_le_slave_reconnect.c      | 21 +++++
+ pebble/comm/ble/gap_le_slave_reconnect.h      |  7 ++
+ .../ble/kernel_le_client/kernel_le_client.c   |  8 ++
+ pebble/popups/bluetooth_pairing_ui.c          |  8 +-
+ pebble/services/bluetooth/Kconfig             | 13 +--
+ pebble/services/bluetooth/bonding.c           | 11 ++-
+ subsys/bluetooth/gap_le_connect.c             | 16 ++++
+ 11 files changed, 187 insertions(+), 22 deletions(-)
+
+diff --git a/include/pbl/bluetooth/gap_le_connect.h b/include/pbl/bluetooth/gap_le_connect.h
+index 71822fe..cba7450 100644
+--- a/include/pbl/bluetooth/gap_le_connect.h
++++ b/include/pbl/bluetooth/gap_le_connect.h
+@@ -143,6 +143,18 @@ struct PBL_PACKED pbl_bt_irk_change {
+  */
+ int pbl_bt_gap_le_disconnect(const struct pbl_bt_device_internal *peer_address);
+ 
++/**
++ * @brief Ask the peer to pair or encrypt the connection.
++ *
++ * As peripheral this sends a Security Request.
++ *
++ * @param peer_address The connected peer.
++ * @retval 0 Security was initiated.
++ * @retval -1 There is no connection with @p peer_address.
++ * @return A positive NimBLE error code if security could not be initiated.
++ */
++int pbl_bt_gap_le_security_initiate(const struct pbl_bt_device_internal *peer_address);
++
+ /**
+  * @brief Called when a connection is established.
+  *
+diff --git a/pebble/apps/system/settings/bluetooth.c b/pebble/apps/system/settings/bluetooth.c
+index 5061ab9..cb60aff 100644
+--- a/pebble/apps/system/settings/bluetooth.c
++++ b/pebble/apps/system/settings/bluetooth.c
+@@ -388,9 +388,21 @@ static int16_t prv_get_row_base_height(SettingsBluetoothData *data, uint16_t row
+ }
+ 
+ static const char *prv_get_hint(SettingsBluetoothData *data) {
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  // One phone and one secondary device can be paired.
++  if (list_count(data->remote_list_head) == 1) {
++    return pbl_i18n_get(
++        "To add a second device, pair it from its Bluetooth settings while this menu is open.",
++        data);
++  }
++  if (data->remote_list_head) {
++    return pbl_i18n_get("Forget a device to pair a new device.", data);
++  }
++#else
+   if (data->remote_list_head) {
+     return pbl_i18n_get("Forget this device to pair a new device.", data);
+   }
++#endif
+   if (bt_ctl_is_airplane_mode_on()) {
+     return pbl_i18n_get("Disable Airplane Mode to connect.", data);
+   }
+@@ -568,7 +580,8 @@ static void prv_expand_cb(SettingsCallbacks *context) {
+   // Only enable pairing/advertising if there are no paired devices (single phone policy)
+   data->did_enable_pairability = false;
+ #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+-  // Multi-link experiment: advertise even with a paired phone, so a second device can connect.
++  // Multi-link: advertise even with a paired phone, so a secondary device can pair.
++  bt_pairability_set_secondary_pairing(true);
+   if (true) {
+ #else
+   if (!data->remote_list_head) {
+@@ -591,6 +604,9 @@ static void prv_hide_cb(SettingsCallbacks *context) {
+   if (data->did_enable_pairability) {
+     bt_pairability_release();
+   }
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  bt_pairability_set_secondary_pairing(false);
++#endif
+ 
+ #ifdef CONFIG_SERVICE_BLE_HRM
+   event_service_client_unsubscribe(&data->ble_hrm_sharing_event_info);
+diff --git a/pebble/comm/ble/gap_le_connect.c b/pebble/comm/ble/gap_le_connect.c
+index 27c56b3..c539edc 100644
+--- a/pebble/comm/ble/gap_le_connect.c
++++ b/pebble/comm/ble/gap_le_connect.c
+@@ -25,6 +25,10 @@
+ #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+ #include <applib/ui/vibes.h>
+ #include <kernel/event_loop.h>
++#include <pbl/services/bluetooth/bluetooth_persistent_storage.h>
++#include <pbl/services/bluetooth/pairability.h>
++
++#include "gap_le_slave_reconnect.h"
+ #endif
+ 
+ PBL_LOG_MODULE_DECLARE(bt, CONFIG_BT_LOG_LEVEL);
+@@ -120,9 +124,12 @@ static bool s_is_connected_as_slave;
+ #define GAP_LE_INVALID_CONN_HANDLE (0xFFFF)
+ //! Number of links on which the local device is LE Slave.
+ static uint8_t s_num_slave_links;
+-//! Handle of the first slave link: legacy connection events are only sent for this one, so the
+-//! rest of the system keeps seeing a single phone.
++//! The phone's link. Legacy connection events and "connected as slave" follow this link only, so
++//! the rest of the system keeps seeing a single phone.
+ static uint16_t s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
++//! The secondary (notification-only) device's link.
++static uint16_t s_secondary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
++static struct pbl_bt_device_internal s_secondary_device;
+ 
+ static void prv_multi_link_vibe_kernel_main_cb(void *data) {
+   if ((uintptr_t)data) {
+@@ -131,6 +138,18 @@ static void prv_multi_link_vibe_kernel_main_cb(void *data) {
+     vibes_short_pulse();
+   }
+ }
++
++static bool prv_is_secondary_connected(void) {
++  return (s_secondary_slave_handle != GAP_LE_INVALID_CONN_HANDLE);
++}
++
++//! The controller stops advertising whenever a link is set up. Restart the remaining advertising
++//! jobs while another slave link can still be accepted.
++static void prv_refresh_advertising_if_link_available(void) {
++  if (s_num_slave_links < CONFIG_NIMBLE_BLE_MAX_CONNECTIONS) {
++    gap_le_advert_handle_disconnect_as_slave();
++  }
++}
+ #endif
+ 
+ //! Role switching is not implemented: always act as slave (never perform LE Create Connection).
+@@ -333,14 +352,35 @@ void pbl_bt_handle_le_connection_complete_event(const struct pbl_bt_conn_complet
+ 
+ #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+         s_num_slave_links++;
+-        PBL_LOG_INFO("Multi-link: slave link up hdl=%u, links=%u", event->handle,
+-                     s_num_slave_links);
+-        if (s_primary_slave_handle == GAP_LE_INVALID_CONN_HANDLE) {
++        const bool is_secondary_pairing = bt_pairability_is_secondary_pairing();
++        // A new device while the settings menu is open and a phone is bonded: pair it as the
++        // secondary device.
++        const bool is_new_secondary = !event->is_resolved && is_secondary_pairing &&
++                                      bt_persistent_storage_has_ble_ancs_bonding();
++        if (bt_persistent_storage_is_ble_secondary_device(&event->peer_address) ||
++            is_new_secondary) {
++          s_secondary_slave_handle = event->handle;
++          s_secondary_device = event->peer_address;
++          PBL_LOG_INFO("Multi-link: secondary link up hdl=%u, links=%u, new=%d", event->handle,
++                       s_num_slave_links, is_new_secondary);
++          if (is_new_secondary) {
++            pbl_bt_gap_le_security_initiate(&event->peer_address);
++          }
++          if (is_secondary_pairing) {
++            launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)1);
++          }
++          gap_le_slave_reconnect_secondary_update(true /* is_secondary_connected */);
++        } else if (s_primary_slave_handle == GAP_LE_INVALID_CONN_HANDLE) {
+           s_primary_slave_handle = event->handle;
++          PBL_LOG_INFO("Multi-link: primary link up hdl=%u, links=%u", event->handle,
++                       s_num_slave_links);
+           prv_put_legacy_connection_event(&event->peer_address, true /* connected */);
+         } else {
+-          launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)1);
++          PBL_LOG_WRN("Multi-link: extra link hdl=%u, links=%u", event->handle,
++                      s_num_slave_links);
+         }
++        s_is_connected_as_slave = (s_primary_slave_handle != GAP_LE_INVALID_CONN_HANDLE);
++        prv_refresh_advertising_if_link_available();
+ #else
+         prv_put_legacy_connection_event(&event->peer_address, true /* connected */);
+ #endif
+@@ -463,16 +503,25 @@ void pbl_bt_handle_le_disconnection_complete_event(
+         if (s_num_slave_links > 0) {
+           s_num_slave_links--;
+         }
+-        PBL_LOG_INFO("Multi-link: slave link down hdl=%u, links=%u", event->handle,
+-                     s_num_slave_links);
+         if (event->handle == s_primary_slave_handle) {
+           s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
++          PBL_LOG_INFO("Multi-link: primary link down hdl=%u, links=%u", event->handle,
++                       s_num_slave_links);
+           prv_put_legacy_connection_event(&event->peer_address, false /* disconnected */);
++        } else if (event->handle == s_secondary_slave_handle) {
++          s_secondary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
++          PBL_LOG_INFO("Multi-link: secondary link down hdl=%u, links=%u", event->handle,
++                       s_num_slave_links);
++          if (bt_pairability_is_secondary_pairing()) {
++            launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)0);
++          }
++          gap_le_slave_reconnect_secondary_update(false /* is_secondary_connected */);
+         } else {
+-          launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)0);
++          PBL_LOG_INFO("Multi-link: extra link down hdl=%u, links=%u", event->handle,
++                       s_num_slave_links);
+         }
+         // "Connected as slave" follows the primary link only, so that reconnection advertising
+-        // for the phone still starts while a second device stays connected.
++        // for the phone still starts while the secondary device stays connected.
+         s_is_connected_as_slave = (s_primary_slave_handle != GAP_LE_INVALID_CONN_HANDLE);
+         gap_le_advert_handle_disconnect_as_slave();
+ #else
+@@ -837,6 +886,18 @@ static void prv_unregister_intent(GAPLEConnectionIntent *intent,
+ // -------------------------------------------------------------------------------------------------
+ 
+ void gap_le_connect_handle_bonding_change(pbl_bt_bonding_id_t bonding_id, BtPersistBondingOp op) {
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  bt_lock();
++  {
++    if (op == BtPersistBondingOpWillDelete && prv_is_secondary_connected() &&
++        !bt_persistent_storage_has_ble_secondary_bonding()) {
++      // The secondary device was forgotten while connected: drop its link.
++      pbl_bt_gap_le_disconnect(&s_secondary_device);
++    }
++    gap_le_slave_reconnect_secondary_update(prv_is_secondary_connected());
++  }
++  bt_unlock();
++#endif
+   // Load from flash outside of the bt_lock() block:
+   GAPLEConnectionIntentBonding updated_bonding;
+   if (op == BtPersistBondingOpDidChange) {
+@@ -987,6 +1048,16 @@ bool gap_le_connect_is_connected_as_slave(void) {
+ }
+ 
+ #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++bool gap_le_connect_is_secondary_connected(void) {
++  bool connected;
++  bt_lock();
++  {
++    connected = prv_is_secondary_connected();
++  }
++  bt_unlock();
++  return connected;
++}
++
+ uint8_t gap_le_connect_num_slave_links(void) {
+   uint8_t num;
+   bt_lock();
+@@ -1041,6 +1112,7 @@ void gap_le_connect_deinit(void) {
+ #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+     s_num_slave_links = 0;
+     s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
++    s_secondary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
+ #endif
+   }
+   bt_unlock();
+diff --git a/pebble/comm/ble/gap_le_connect.h b/pebble/comm/ble/gap_le_connect.h
+index c359645..4ae30ef 100644
+--- a/pebble/comm/ble/gap_le_connect.h
++++ b/pebble/comm/ble/gap_le_connect.h
+@@ -29,6 +29,9 @@ bool gap_le_connect_is_connected_as_slave(void);
+ #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+ //! Number of links on which the local device is currently LE Slave.
+ uint8_t gap_le_connect_num_slave_links(void);
++
++//! True if the secondary (notification-only) device is connected.
++bool gap_le_connect_is_secondary_connected(void);
+ #endif
+ 
+ void gap_le_connect_handle_bonding_change(pbl_bt_bonding_id_t bonding, BtPersistBondingOp op);
+diff --git a/pebble/comm/ble/gap_le_slave_reconnect.c b/pebble/comm/ble/gap_le_slave_reconnect.c
+index 538fe61..89520ba 100644
+--- a/pebble/comm/ble/gap_le_slave_reconnect.c
++++ b/pebble/comm/ble/gap_le_slave_reconnect.c
+@@ -21,6 +21,9 @@
+ //! bt_lock() needs to be taken before accessing this variable.
+ static GAPLEAdvertisingJobRef s_reconnect_advert_job;
+ static bool s_is_basic_reconnection_enabled;
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++static bool s_is_secondary_reconnection_enabled;
++#endif
+ static bool s_is_hrm_reconnection_enabled;
+ 
+ typedef enum {
+@@ -70,6 +73,11 @@ static ReconnectType prv_current_reconnect_type(void) {
+   if (s_is_basic_reconnection_enabled) {
+     return ReconnectType_Plain;
+   }
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  if (s_is_secondary_reconnection_enabled) {
++    return ReconnectType_Plain;
++  }
++#endif
+   return ReconnectType_None;
+ }
+ 
+@@ -208,6 +216,19 @@ unlock:
+   bt_unlock();
+ }
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++// -----------------------------------------------------------------------------
++void gap_le_slave_reconnect_secondary_update(bool is_secondary_connected) {
++  bt_lock();
++  {
++    const bool enable =
++        !is_secondary_connected && bt_persistent_storage_has_ble_secondary_bonding();
++    prv_set_and_evaluate(&s_is_secondary_reconnection_enabled, enable);
++  }
++  bt_unlock();
++}
++#endif
++
+ #ifdef CONFIG_HRM
+ 
+ #define RECONNECT_HRM_TIMEOUT_SECS (60)
+diff --git a/pebble/comm/ble/gap_le_slave_reconnect.h b/pebble/comm/ble/gap_le_slave_reconnect.h
+index b355bd8..c171037 100644
+--- a/pebble/comm/ble/gap_le_slave_reconnect.h
++++ b/pebble/comm/ble/gap_le_slave_reconnect.h
+@@ -22,6 +22,13 @@ void gap_le_slave_reconnect_stop(void);
+ //! - When Bluetooth is turned on
+ void gap_le_slave_reconnect_start(void);
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++//! Advertises for reconnection of the secondary device while it is bonded and not connected,
++//! independently of the phone's connection state.
++//! @param is_secondary_connected True if the secondary device is currently connected.
++void gap_le_slave_reconnect_secondary_update(bool is_secondary_connected);
++#endif
++
+ #ifdef CONFIG_HRM
+ 
+ //! Start advertising for reconnection using a payload containing the Heart Rate Service UUID.
+diff --git a/pebble/comm/ble/kernel_le_client/kernel_le_client.c b/pebble/comm/ble/kernel_le_client/kernel_le_client.c
+index 8710a7e..6b37ac1 100644
+--- a/pebble/comm/ble/kernel_le_client/kernel_le_client.c
++++ b/pebble/comm/ble/kernel_le_client/kernel_le_client.c
+@@ -507,6 +507,10 @@ void kernel_le_client_init(void) {
+   if (gateway_bonding != PBL_BT_BONDING_ID_INVALID) {
+     prv_connect_gateway_bonding(gateway_bonding);
+   }
++
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  gap_le_slave_reconnect_secondary_update(gap_le_connect_is_secondary_connected());
++#endif
+ }
+ 
+ // -------------------------------------------------------------------------------------------------
+@@ -515,6 +519,10 @@ void kernel_le_client_deinit(void) {
+   launcher_task_add_callback(prv_cleanup_clients_kernel_main_cb, nullptr);
+ 
+   gap_le_slave_reconnect_stop();
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  // Treat the secondary as connected to stop advertising for it.
++  gap_le_slave_reconnect_secondary_update(true /* is_secondary_connected */);
++#endif
+   gap_le_connect_cancel_all();
+ #if defined(CONFIG_PP_TRANSPORT_GATT)
+   pbl_pp_gatt_destroy();
+diff --git a/pebble/popups/bluetooth_pairing_ui.c b/pebble/popups/bluetooth_pairing_ui.c
+index 6a56d00..641ce81 100644
+--- a/pebble/popups/bluetooth_pairing_ui.c
++++ b/pebble/popups/bluetooth_pairing_ui.c
+@@ -26,6 +26,8 @@
+ #include <applib/ui/window_stack.h>
+ #include <comm/bt_lock.h>
+ #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++#include <pbl/services/bluetooth/pairability.h>
++
+ #include <comm/ble/gap_le_connect.h>
+ #endif
+ #include <kernel/event_loop.h>
+@@ -655,9 +657,9 @@ void pbl_bt_cb_pairing_confirm_handle_request(const struct pbl_bt_pairing_confir
+                                               const char *device_name,
+                                               const char *confirmation_token) {
+ #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+-  // Multi-link experiment: never pair over a second link. Storing a second bonding would replace
+-  // the phone's bonding (single BLE bonding policy).
+-  if (gap_le_connect_num_slave_links() > 1) {
++  // Multi-link: only pair over a second link while the Bluetooth settings menu is open, where the
++  // new bonding becomes the secondary device instead of replacing the phone.
++  if (gap_le_connect_num_slave_links() > 1 && !bt_pairability_is_secondary_pairing()) {
+     PBL_LOG_WRN("Multi-link: rejecting pairing on a second link");
+     pbl_bt_pairing_confirm(ctx, false /* is_confirmed */);
+     return;
+diff --git a/pebble/services/bluetooth/Kconfig b/pebble/services/bluetooth/Kconfig
+index 7358cb6..ac6ab75 100644
+--- a/pebble/services/bluetooth/Kconfig
++++ b/pebble/services/bluetooth/Kconfig
+@@ -24,15 +24,16 @@ config BLE_GATT_SUBSCRIPTION_DEPTH
+       Deeper absorbs notification bursts (fewer drops) at the cost of RAM.
+ 
+ config BT_MULTI_LINK_EXPERIMENT
+-    bool "Experimental: accept a second BLE link"
++    bool "Experimental: secondary BLE device next to the phone"
+     default n
+     depends on !RECOVERY_FW
+     help
+-      Experiment for multi-device support. Raises the NimBLE link limit to 2,
+-      keeps advertising while Settings > Bluetooth is open even with a paired
+-      phone, and vibrates (double pulse) when a second device connects, short
+-      pulse when it disconnects. The second link is never paired and gets no
+-      ANCS/AMS/PPoGATT: it only shows whether the controller accepts it.
++      Experimental multi-device support. Raises the NimBLE link limit to 2
++      and lets a second device (e.g. an iPad) pair as a secondary device
++      while Settings > Bluetooth is open. One phone and one secondary
++      bonding are kept, and the watch advertises for the secondary while it
++      is bonded and disconnected. The secondary link gets no
++      ANCS/AMS/PPoGATT yet.
+ 
+ config BT_ANCS_CLIENT
+     bool "ANCS (Apple Notification Center Service) client"
+diff --git a/pebble/services/bluetooth/bonding.c b/pebble/services/bluetooth/bonding.c
+index 1cee363..df4e337 100644
+--- a/pebble/services/bluetooth/bonding.c
++++ b/pebble/services/bluetooth/bonding.c
+@@ -60,8 +60,15 @@ void pbl_bt_cb_handle_create_bonding(const struct pbl_bt_bonding *bonding,
+     return;
+   }
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  // Storage may have made it the secondary device.
++  const bool is_gateway = bt_persistent_storage_is_ble_ancs_bonding(bonding_id);
++#else
++  const bool is_gateway = bonding->is_gateway;
++#endif
++
+   if (launcher_task_is_current_task()) {
+-    prv_finalize_create_bonding(bonding_id, addr, bonding->is_gateway);
++    prv_finalize_create_bonding(bonding_id, addr, is_gateway);
+     return;
+   }
+ 
+@@ -70,7 +77,7 @@ void pbl_bt_cb_handle_create_bonding(const struct pbl_bt_bonding *bonding,
+   *context = (CreateBondingContext){
+     .bonding_id = bonding_id,
+     .addr = *addr,
+-    .is_gateway = bonding->is_gateway,
++    .is_gateway = is_gateway,
+   };
+   launcher_task_add_callback(prv_finalize_create_bonding_cb, context);
+ }
+diff --git a/subsys/bluetooth/gap_le_connect.c b/subsys/bluetooth/gap_le_connect.c
+index 408caf4..5fdf0f7 100644
+--- a/subsys/bluetooth/gap_le_connect.c
++++ b/subsys/bluetooth/gap_le_connect.c
+@@ -25,3 +25,19 @@ int pbl_bt_gap_le_disconnect(const struct pbl_bt_device_internal *peer_address)
+ 
+   return rc;
+ }
++
++int pbl_bt_gap_le_security_initiate(const struct pbl_bt_device_internal *peer_address) {
++  uint16_t conn_handle;
++
++  if (!pebble_device_to_nimble_conn_handle(peer_address, &conn_handle)) {
++    PBL_LOG_ERR("pbl_bt_gap_le_security_initiate: Failed to find connection handle");
++    return -1;
++  }
++
++  int rc = ble_gap_security_initiate(conn_handle);
++  if (rc != 0) {
++    PBL_LOG_ERR("ble_gap_security_initiate rc=0x%04x", (uint16_t)rc);
++  }
++
++  return rc;
++}
+-- 
+2.43.0
+
