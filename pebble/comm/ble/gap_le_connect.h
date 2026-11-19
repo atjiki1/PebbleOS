@@ -32,6 +32,9 @@ uint8_t gap_le_connect_num_slave_links(void);
 
 //! True if the secondary (notification-only) device is connected.
 bool gap_le_connect_is_secondary_connected(void);
+
+//! True if `device` is the connected secondary device.
+bool gap_le_connect_is_secondary_link_device(const struct pbl_bt_device_internal *device);
 #endif
 
 void gap_le_connect_handle_bonding_change(pbl_bt_bonding_id_t bonding, BtPersistBondingOp op);

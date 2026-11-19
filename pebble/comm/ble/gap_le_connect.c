@@ -29,6 +29,7 @@
 #include <pbl/services/bluetooth/pairability.h>
 
 #include "gap_le_slave_reconnect.h"
+#include <comm/ble/kernel_le_client/kernel_le_client.h>
 #endif
 
 PBL_LOG_MODULE_DECLARE(bt, CONFIG_BT_LOG_LEVEL);
@@ -141,6 +142,28 @@ static void prv_multi_link_vibe_kernel_main_cb(void *data) {
 
 static bool prv_is_secondary_connected(void) {
   return (s_secondary_slave_handle != GAP_LE_INVALID_CONN_HANDLE);
+}
+
+typedef struct {
+  struct pbl_bt_device_internal device;
+  bool connected;
+} SecondaryConnectionContext;
+
+static void prv_secondary_connection_kernel_main_cb(void *data) {
+  SecondaryConnectionContext *ctx = data;
+  kernel_le_client_handle_secondary_connection(&ctx->device, ctx->connected);
+  pbl_free(ctx);
+}
+
+//! Hands the secondary link's state to the kernel LE client (ANCS) on KernelMain.
+static void prv_post_secondary_connection(const struct pbl_bt_device_internal *device,
+                                          bool connected) {
+  SecondaryConnectionContext *ctx = pbl_malloc_check(sizeof(*ctx));
+  *ctx = (SecondaryConnectionContext){
+    .device = *device,
+    .connected = connected,
+  };
+  launcher_task_add_callback(prv_secondary_connection_kernel_main_cb, ctx);
 }
 
 //! The controller stops advertising whenever a link is set up. Restart the remaining advertising
@@ -515,6 +538,7 @@ void pbl_bt_handle_le_disconnection_complete_event(
           if (bt_pairability_is_secondary_pairing()) {
             launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)0);
           }
+          prv_post_secondary_connection(&s_secondary_device, false /* connected */);
           gap_le_slave_reconnect_secondary_update(false /* is_secondary_connected */);
         } else {
           PBL_LOG_INFO("Multi-link: extra link down hdl=%u, links=%u", event->handle,
@@ -615,6 +639,12 @@ void pbl_bt_handle_le_encryption_change_event(const struct pbl_bt_encryption_cha
     bluetooth_analytics_handle_encryption_change();
 #ifdef CONFIG_BT_SERVICE_PPS
     pbl_bt_pps_handle_status_change(connection);
+#endif
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+    if (prv_is_secondary_connected() &&
+        bt_device_internal_equal(&connection->device, &s_secondary_device)) {
+      prv_post_secondary_connection(&connection->device, true /* connected */);
+    }
 #endif
   }
 
@@ -1048,6 +1078,17 @@ bool gap_le_connect_is_connected_as_slave(void) {
 }
 
 #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+bool gap_le_connect_is_secondary_link_device(const struct pbl_bt_device_internal *device) {
+  bool is_secondary;
+  bt_lock();
+  {
+    is_secondary =
+        prv_is_secondary_connected() && bt_device_internal_equal(device, &s_secondary_device);
+  }
+  bt_unlock();
+  return is_secondary;
+}
+
 bool gap_le_connect_is_secondary_connected(void) {
   bool connected;
   bt_lock();

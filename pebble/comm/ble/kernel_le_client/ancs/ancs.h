@@ -77,3 +77,12 @@ void ancs_perform_action(uint32_t notification_uid, uint8_t action_id);
 
 //! Called by kernel_le_client/dis/dis.c
 void ancs_handle_ios9_or_newer_detected(void);
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Multi-link: a second ANCS client for the secondary iOS device. Its notification UIDs are
+//! reported with the top bit set; ancs_perform_action() routes such UIDs back to it.
+void ancs_secondary_create(void);
+void ancs_secondary_destroy(void);
+void ancs_secondary_handle_service_discovered(pbl_bt_characteristic_t *characteristics);
+void ancs_secondary_invalidate_all_references(void);
+#endif

@@ -20,3 +20,10 @@ void kernel_le_client_handle_event(const PebbleEvent *event);
 void kernel_le_client_init(void);
 
 void kernel_le_client_deinit(void);
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Multi-link: the secondary device's link is encrypted (connected) or gone. Runs the secondary
+//! ANCS client; must be called on KernelMain.
+void kernel_le_client_handle_secondary_connection(const struct pbl_bt_device_internal *device,
+                                                  bool connected);
+#endif

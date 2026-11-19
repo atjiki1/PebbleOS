@@ -24,6 +24,10 @@
 #include <pbl/util/testing.h>
 #include <pbl/util/units.h>
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+#include <pbl/util/misc.h>
+#endif
+
 #include <comm/ble/gatt_client_operations.h>
 #include <comm/ble/gatt_client_subscriptions.h>
 #include <kernel/event_loop.h>
@@ -119,9 +123,84 @@ typedef struct ANCSClient {
   // Consecutive alive checks whose Control Point write iOS rejected.
   uint8_t consecutive_rejected_alive_checks;
   ReassemblyContext reassembly_ctx;
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  uint64_t connected_ticks;
+  bool connected_ticks_valid;
+#endif
 } ANCSClient;
 
 static ANCSClient *s_ancs_client;
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Multi-link: one ANCS client per iOS device, the phone's (gateway) and the secondary device's.
+//! s_ancs_client points at the client being worked on: the entry points select a client and
+//! restore the gateway's before returning, so all other code is unchanged.
+static ANCSClient *s_gateway_ancs_client;
+static ANCSClient *s_secondary_ancs_client;
+
+static void prv_select_client(ANCSClient *client) {
+  s_ancs_client = client;
+}
+
+static void prv_restore_gateway_client(void) {
+  s_ancs_client = s_gateway_ancs_client;
+}
+
+static bool prv_is_secondary_client(void) {
+  return s_ancs_client && (s_ancs_client == s_secondary_ancs_client);
+}
+
+//! True if the pointer still refers to a live client (callbacks may outlive it).
+static bool prv_is_live_client(const ANCSClient *client) {
+  return client && (client == s_gateway_ancs_client || client == s_secondary_ancs_client);
+}
+
+static bool prv_client_has_characteristic(const ANCSClient *client,
+                                          pbl_bt_characteristic_t characteristic) {
+  if (!client || characteristic == PBL_BT_CHARACTERISTIC_INVALID) {
+    return false;
+  }
+  for (int c = 0; c < NumANCSCharacteristic; ++c) {
+    if (client->characteristics[c] == characteristic) {
+      return true;
+    }
+  }
+  return false;
+}
+
+//! Selects the client owning `characteristic`, defaulting to the gateway's.
+static void prv_select_client_for_characteristic(pbl_bt_characteristic_t characteristic) {
+  if (prv_client_has_characteristic(s_secondary_ancs_client, characteristic)) {
+    prv_select_client(s_secondary_ancs_client);
+  } else {
+    prv_select_client(s_gateway_ancs_client);
+  }
+}
+
+//! Selects the client a timer or callback was armed for. Returns false if it is gone.
+static bool prv_select_client_for_callback(ANCSClient *client) {
+  if (!prv_is_live_client(client)) {
+    return false;
+  }
+  prv_select_client(client);
+  return true;
+}
+
+//! UIDs of the secondary device's notifications get this bit, so they can't collide with the
+//! phone's and actions can be routed back.
+#define ANCS_SECONDARY_UID_FLAG (0x80000000UL)
+
+static uint32_t prv_external_uid(uint32_t uid) {
+  return prv_is_secondary_client() ? (uid | ANCS_SECONDARY_UID_FLAG) : uid;
+}
+
+#define ANCS_CALLBACK_DATA ((void *)s_ancs_client)
+static void prv_invalidate_all_references(void);
+#define ANCS_INVALIDATE_CURRENT() prv_invalidate_all_references()
+#else
+#define ANCS_CALLBACK_DATA (nullptr)
+#define ANCS_INVALIDATE_CURRENT() ancs_invalidate_all_references()
+#endif
 
 // -----------------------------------------------------------------------------
 // State Machine
@@ -322,13 +401,22 @@ static void prv_reset_and_idle(void) {
   s_ancs_client->consecutive_busy_alive_checks = 0;
 }
 
-static void prv_reset_and_retry(void *unused) {
+static void prv_reset_and_retry(void *data) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (!prv_select_client_for_callback(data)) {
+    return;
+  }
+#else
   if (s_ancs_client == nullptr) {
     return;
   }
+#endif
 
   prv_reset_reassembly_context();
   prv_notif_queue_next();
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_restore_gateway_client();
+#endif
 }
 
 static void prv_reset_and_next(void) {
@@ -355,20 +443,34 @@ static void prv_reset_due_to_bt_error(void) {
 //
 // Drops the queue head if its Control Point response never arrives.
 
-static void prv_op_timeout_launcher_task_cb(void *unused) {
+static void prv_op_timeout_launcher_task_cb(void *data) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (!prv_select_client_for_callback(data)) {
+    return;
+  }
+#else
   if (!s_ancs_client) {
     return;
   }
+#endif
   prv_op_timeout_stop();
   PBL_LOG_WRN("ANCS op timed out (state=%d, uid=%" PRIu32 "); dropping stuck head",
               s_ancs_client->state, s_ancs_client->queue ? s_ancs_client->queue->uid : 0);
   // Drop the wedged head so the queue keeps draining.
   prv_reset_and_next();
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_restore_gateway_client();
+#endif
 }
 
 static void prv_op_timeout_fn(struct pbl_work *work) {
   // Hop to KernelMain; ANCS state is single-threaded there.
-  launcher_task_add_callback(prv_op_timeout_launcher_task_cb, nullptr);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  void *data = container_of(work, ANCSClient, op_timeout_work.work);
+#else
+  void *data = nullptr;
+#endif
+  launcher_task_add_callback(prv_op_timeout_launcher_task_cb, data);
 }
 
 static void prv_op_timeout_stop(void) {
@@ -432,6 +534,12 @@ static void prv_handle_alive_check_rejected(enum pbl_bt_gatt_error error) {
   if (s_cp_rejected_warning_shown) {
     return;
   }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (prv_is_secondary_client()) {
+    PBL_LOG_WRN("ANCS Control Point rejected by the secondary device (error=%d)", error);
+    return;
+  }
+#endif
   PBL_LOG_WRN("ANCS Control Point rejected %u times (error=%d); warning user",
               s_ancs_client->consecutive_rejected_alive_checks, error);
   s_cp_rejected_warning_shown = true;
@@ -507,9 +615,15 @@ static void prv_resubscribe_to_ancs(void) {
 }
 
 static void prv_is_ancs_alive_response_timeout_launcher_task_cb(void *data) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (!prv_select_client_for_callback(data)) {
+    return;
+  }
+#else
   if (!s_ancs_client) {
     return;
   }
+#endif
 
   prv_reset_due_to_bt_error();
 
@@ -529,12 +643,20 @@ static void prv_is_ancs_alive_response_timeout_launcher_task_cb(void *data) {
   // stays connected but silent until reboot. The call is idempotent --
   // prv_ancs_is_alive_start_tracking() cancels and reschedules.
   prv_ancs_is_alive_schedule_next_check();
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_restore_gateway_client();
+#endif
 }
 
 static void prv_is_ancs_alive_response_timeout_fn(struct pbl_work *work) {
   PBL_LOG_DBG("ANCS isn't alive");
 
-  launcher_task_add_callback(prv_is_ancs_alive_response_timeout_launcher_task_cb, nullptr);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  void *data = container_of(work, ANCSClient, is_alive_response_work.work);
+#else
+  void *data = nullptr;
+#endif
+  launcher_task_add_callback(prv_is_ancs_alive_response_timeout_launcher_task_cb, data);
 }
 
 static void prv_ancs_is_alive(void) {
@@ -583,9 +705,15 @@ PBL_T_STATIC void prv_check_ancs_alive(void) {
 }
 
 PBL_T_STATIC void prv_is_ancs_alive_launcher_task_cb(void *data) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (!prv_select_client_for_callback(data)) {
+    return;
+  }
+#else
   if (!s_ancs_client) {
     return;
   }
+#endif
   if (s_ancs_client->state == ANCSClientStateIdle) {
     s_ancs_client->consecutive_busy_alive_checks = 0;
     prv_check_ancs_alive();
@@ -601,10 +729,18 @@ PBL_T_STATIC void prv_is_ancs_alive_launcher_task_cb(void *data) {
     // Legitimately processing; defer this round's probe.
     s_ancs_client->alive_check_pending = true;
   }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_restore_gateway_client();
+#endif
 }
 
 static void prv_is_ancs_alive_fn(struct pbl_work *work) {
-  launcher_task_add_callback(prv_is_ancs_alive_launcher_task_cb, nullptr);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  void *data = container_of(work, ANCSClient, is_alive_work.work);
+#else
+  void *data = nullptr;
+#endif
+  launcher_task_add_callback(prv_is_ancs_alive_launcher_task_cb, data);
 }
 
 // -----------------------------------------------------------------------------
@@ -618,11 +754,24 @@ static bool s_session_active = false;
 static bool s_had_session = false;
 
 static void prv_start_post_connection_ignore_window(void) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (prv_is_secondary_client()) {
+    s_ancs_client->connected_ticks = pbl_uptime_ticks();
+    s_ancs_client->connected_ticks_valid = true;
+    return;
+  }
+#endif
   s_connected_ticks = pbl_uptime_ticks();
   s_connected_ticks_valid = true;
 }
 
 static bool prv_just_connected(void) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (prv_is_secondary_client()) {
+    return s_ancs_client->connected_ticks_valid &&
+           (pbl_uptime_ticks() - s_ancs_client->connected_ticks) < POST_CONNECTION_IGNORE_TICKS;
+  }
+#endif
   return s_connected_ticks_valid &&
          (pbl_uptime_ticks() - s_connected_ticks) < POST_CONNECTION_IGNORE_TICKS;
 }
@@ -745,7 +894,12 @@ static void prv_reassemble_ds_notification(uint32_t length, const uint8_t *data)
 }
 
 static void prv_put_ancs_message(ANCSAttribute **app_attrs) {
-  ancs_notifications_handle_message(s_ancs_client->queue->uid, s_ancs_client->queue->properties,
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  const uint32_t uid = prv_external_uid(s_ancs_client->queue->uid);
+#else
+  const uint32_t uid = s_ancs_client->queue->uid;
+#endif
+  ancs_notifications_handle_message(uid, s_ancs_client->queue->properties,
                                     s_ancs_client->attributes, app_attrs);
 }
 
@@ -895,7 +1049,7 @@ static void prv_get_notification_attributes(uint32_t uid) {
       // Waiting on the retry timer, not a response.
       prv_op_timeout_stop();
       prv_set_state(ANCSClientStateRetrying);
-      evented_timer_register(ANCS_RETRY_TIME_MS, false, prv_reset_and_retry, nullptr);
+      evented_timer_register(ANCS_RETRY_TIME_MS, false, prv_reset_and_retry, ANCS_CALLBACK_DATA);
     }
   }
 }
@@ -940,6 +1094,11 @@ static ANCSCharacteristic prv_get_id_for_characteristic(
 }
 
 static void prv_put_ancs_disconnected_event(void) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (prv_is_secondary_client()) {
+    return;
+  }
+#endif
   if (s_session_active) {
     s_session_active = false;
     s_had_session = true;
@@ -953,7 +1112,11 @@ static void prv_put_ancs_disconnected_event(void) {
 }
 
 // Catching the subscription (CCCD write) confirmation for analytics purposes:
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static void prv_handle_subscribe(pbl_bt_characteristic_t subscribed_characteristic,
+#else
 void ancs_handle_subscribe(pbl_bt_characteristic_t subscribed_characteristic,
+#endif
                            BLESubscription subscription_type, enum pbl_bt_gatt_error error) {
   ANCSCharacteristic characteristic_id = prv_get_id_for_characteristic(subscribed_characteristic);
   if (characteristic_id != ANCSCharacteristicNotification &&
@@ -968,14 +1131,24 @@ void ancs_handle_subscribe(pbl_bt_characteristic_t subscribed_characteristic,
     if (characteristic_id == ANCSCharacteristicData) {
       prv_ancs_is_alive_start_tracking();
       prv_start_post_connection_ignore_window();
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+      if (!prv_is_secondary_client()) {
+        s_session_active = true;
+      }
+#else
       s_session_active = true;
+#endif
     }
   } else {
     PBL_LOG_ERR("Failed to subscribe charx: %u (error=%u)", characteristic_id, error);
   }
 }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static void prv_invalidate_all_references(void) {
+#else
 void ancs_invalidate_all_references(void) {
+#endif
   for (int c = 0; c < NumANCSCharacteristic; c++) {
     s_ancs_client->characteristics[c] = PBL_BT_CHARACTERISTIC_INVALID;
   }
@@ -984,13 +1157,21 @@ void ancs_invalidate_all_references(void) {
   prv_put_ancs_disconnected_event();
 }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static void prv_handle_service_removed(pbl_bt_characteristic_t *characteristics,
+#else
 void ancs_handle_service_removed(pbl_bt_characteristic_t *characteristics,
+#endif
                                  uint8_t num_characteristics) {
   // There should only be one ancs client
-  ancs_invalidate_all_references();
+  ANCS_INVALIDATE_CURRENT();
 }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static void prv_handle_service_discovered(pbl_bt_characteristic_t *characteristics) {
+#else
 void ancs_handle_service_discovered(pbl_bt_characteristic_t *characteristics) {
+#endif
   PBL_LOG_DBG("In ANCS service discovery CB");
   PBL_ASSERTN(characteristics); // should only be called if we found something!
 
@@ -999,7 +1180,7 @@ void ancs_handle_service_discovered(pbl_bt_characteristic_t *characteristics) {
 
   if (s_ancs_client->characteristics[0] != PBL_BT_CHARACTERISTIC_INVALID) {
     PBL_LOG_WRN("Multiple ANCS services registered?!");
-    ancs_invalidate_all_references();
+    ANCS_INVALIDATE_CURRENT();
   }
 
   // Keep around the pbl_bt_characteristic_t references:
@@ -1013,13 +1194,18 @@ void ancs_handle_service_discovered(pbl_bt_characteristic_t *characteristics) {
         gatt_client_subscriptions_subscribe(characteristics[c], BLESubscriptionNotifications);
     if (e != PBL_BT_ERRNO_OK) {
       PBL_LOG_WRN("Failed to subscribe ANCS charx %d (err=%d), ignoring service", c, e);
-      ancs_invalidate_all_references();
+      ANCS_INVALIDATE_CURRENT();
       return;
     }
   }
 }
 
 bool ancs_can_handle_characteristic(pbl_bt_characteristic_t characteristic) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (prv_client_has_characteristic(s_secondary_ancs_client, characteristic)) {
+    return true;
+  }
+#endif
   if (!s_ancs_client) {
     return false;
   }
@@ -1088,7 +1274,12 @@ static void prv_handle_ns_notification(uint32_t length, const uint8_t *notificat
       // we got in the past 2 hours. To get past this ignore notifications for the first couple
       // seconds after connecting
       if (prv_just_connected() && (nsnotification->event_flags & EventFlagPreExisting)) {
-        if (s_had_session) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+        const bool had_session = s_had_session && !prv_is_secondary_client();
+#else
+        const bool had_session = s_had_session;
+#endif
+        if (had_session) {
           PBL_LOG_DBG("PreExisting ANCS notification after reconnecting");
           prv_notif_queue_push_attr_request(nsnotification->uid,
                                             properties | ANCSProperty_Recovered);
@@ -1107,7 +1298,12 @@ static void prv_handle_ns_notification(uint32_t length, const uint8_t *notificat
       break;
     case EventIDNotificationRemoved:
       PBL_LOG_DBG("Removed ANCS notification");
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+      ancs_notifications_handle_notification_removed(prv_external_uid(nsnotification->uid),
+                                                     properties);
+#else
       ancs_notifications_handle_notification_removed(nsnotification->uid, properties);
+#endif
       break;
   }
 }
@@ -1131,7 +1327,12 @@ static void prv_handle_ds_notification(uint32_t length, const uint8_t *data) {
   }
 }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static void prv_handle_read_or_notification(pbl_bt_characteristic_t characteristic,
+                                            const uint8_t *value,
+#else
 void ancs_handle_read_or_notification(pbl_bt_characteristic_t characteristic, const uint8_t *value,
+#endif
                                       size_t value_length, enum pbl_bt_gatt_error error) {
   if (error != PBL_BT_GATT_ERROR_SUCCESS) {
     PBL_LOG_ERR("Read or notification error: %d", error);
@@ -1157,7 +1358,11 @@ void ancs_handle_read_or_notification(pbl_bt_characteristic_t characteristic, co
 // -----------------------------------------------------------------------------
 // Writing commands to the ANCS Control Point
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static void prv_handle_write_response(pbl_bt_characteristic_t characteristic,
+#else
 void ancs_handle_write_response(pbl_bt_characteristic_t characteristic,
+#endif
                                 enum pbl_bt_gatt_error error) {
   if (error == ANCS_INVALID_PARAM) {
     if (s_ancs_client->state == ANCSClientStateAliveCheck) {
@@ -1224,6 +1429,20 @@ static void prv_perform_action(uint32_t notification_uid, ActionId action_id) {
 }
 
 static void prv_serialize_action(const PerformNotificationActionMsg *action_msg) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (action_msg->notification_uid != INVALID_NOTIFICATION_UID &&
+      (action_msg->notification_uid & ANCS_SECONDARY_UID_FLAG)) {
+    if (!s_secondary_ancs_client) {
+      PBL_LOG_ERR("No ANCS client for the secondary device");
+      return;
+    }
+    prv_select_client(s_secondary_ancs_client);
+    prv_notif_queue_push_action(action_msg->notification_uid & ~ANCS_SECONDARY_UID_FLAG,
+                                action_msg->action_id);
+    prv_restore_gateway_client();
+    return;
+  }
+#endif
   if (!s_ancs_client) {
     PBL_LOG_ERR("No ANCS client");
     return;
@@ -1265,16 +1484,49 @@ void ancs_handle_ios9_or_newer_detected(void) {
 // -------------------------------------------------------------------------------------------------
 // Lifecycle
 
+static ANCSClient *prv_client_alloc(void) {
+  ANCSClient *client = (ANCSClient *)pbl_zalloc_check(sizeof(ANCSClient));
+  pbl_wallclock_work_init(&client->is_alive_work, prv_is_ancs_alive_fn);
+  pbl_wallclock_work_init(&client->is_alive_response_work, prv_is_ancs_alive_response_timeout_fn);
+  pbl_wallclock_work_init(&client->op_timeout_work, prv_op_timeout_fn);
+  pbl_buffer_init(&client->reassembly_ctx.buffer, sizeof(client->reassembly_ctx.buffer_storage));
+  return client;
+}
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! The app name cache is shared by both clients.
+static void prv_app_name_storage_ref(void) {
+  if (!s_gateway_ancs_client && !s_secondary_ancs_client) {
+    ancs_app_name_storage_init();
+  }
+}
+
+static void prv_app_name_storage_unref(void) {
+  if (!s_gateway_ancs_client && !s_secondary_ancs_client) {
+    ancs_app_name_storage_deinit();
+  }
+}
+#endif
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Tears down the selected client. The caller frees it and clears its pointer.
+static void prv_client_teardown(void) {
+  prv_ancs_is_alive_stop_timer();
+  prv_op_timeout_stop();
+  prv_reset_and_flush();
+}
+#endif
+
 void ancs_create(void) {
   PBL_ASSERTN(s_ancs_client == nullptr);
-  s_ancs_client = (ANCSClient *)pbl_zalloc_check(sizeof(ANCSClient));
-  pbl_wallclock_work_init(&s_ancs_client->is_alive_work, prv_is_ancs_alive_fn);
-  pbl_wallclock_work_init(&s_ancs_client->is_alive_response_work,
-                          prv_is_ancs_alive_response_timeout_fn);
-  pbl_wallclock_work_init(&s_ancs_client->op_timeout_work, prv_op_timeout_fn);
-  pbl_buffer_init(&s_ancs_client->reassembly_ctx.buffer,
-                  sizeof(s_ancs_client->reassembly_ctx.buffer_storage));
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_app_name_storage_ref();
+  s_gateway_ancs_client = prv_client_alloc();
+  s_ancs_client = s_gateway_ancs_client;
+#else
+  s_ancs_client = prv_client_alloc();
   ancs_app_name_storage_init();
+#endif
 }
 
 void ancs_destroy(void) {
@@ -1284,10 +1536,114 @@ void ancs_destroy(void) {
   prv_ancs_is_alive_stop_timer();
   prv_op_timeout_stop();
 
+#if !defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
   ancs_app_name_storage_deinit();
+#endif
 
   prv_reset_and_flush();
   pbl_free(s_ancs_client);
   s_ancs_client = nullptr;
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  s_gateway_ancs_client = nullptr;
+  prv_app_name_storage_unref();
+#endif
   prv_put_ancs_disconnected_event();
 }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+// -------------------------------------------------------------------------------------------------
+// Multi-link entry points
+
+void ancs_secondary_create(void) {
+  if (s_secondary_ancs_client) {
+    return;
+  }
+  prv_app_name_storage_ref();
+  s_secondary_ancs_client = prv_client_alloc();
+  // The secondary has no Pebble app session to report its iOS version: assume a current iOS.
+  s_secondary_ancs_client->version = ANCSVersion_iOS9OrNewer;
+}
+
+void ancs_secondary_destroy(void) {
+  if (!s_secondary_ancs_client) {
+    return;
+  }
+  prv_select_client(s_secondary_ancs_client);
+  prv_client_teardown();
+  pbl_free(s_secondary_ancs_client);
+  s_secondary_ancs_client = nullptr;
+  prv_restore_gateway_client();
+  prv_app_name_storage_unref();
+}
+
+void ancs_secondary_handle_service_discovered(pbl_bt_characteristic_t *characteristics) {
+  if (!s_secondary_ancs_client) {
+    return;
+  }
+  prv_select_client(s_secondary_ancs_client);
+  prv_handle_service_discovered(characteristics);
+  prv_restore_gateway_client();
+}
+
+void ancs_secondary_invalidate_all_references(void) {
+  if (!s_secondary_ancs_client) {
+    return;
+  }
+  prv_select_client(s_secondary_ancs_client);
+  prv_invalidate_all_references();
+  prv_restore_gateway_client();
+}
+
+void ancs_handle_service_discovered(pbl_bt_characteristic_t *characteristics) {
+  prv_restore_gateway_client();
+  if (!s_ancs_client) {
+    return;
+  }
+  prv_handle_service_discovered(characteristics);
+}
+
+void ancs_invalidate_all_references(void) {
+  prv_restore_gateway_client();
+  if (!s_ancs_client) {
+    return;
+  }
+  prv_invalidate_all_references();
+}
+
+void ancs_handle_service_removed(pbl_bt_characteristic_t *characteristics,
+                                 uint8_t num_characteristics) {
+  prv_select_client_for_characteristic(num_characteristics ? characteristics[0]
+                                                           : PBL_BT_CHARACTERISTIC_INVALID);
+  if (s_ancs_client) {
+    prv_handle_service_removed(characteristics, num_characteristics);
+  }
+  prv_restore_gateway_client();
+}
+
+void ancs_handle_subscribe(pbl_bt_characteristic_t subscribed_characteristic,
+                           BLESubscription subscription_type, enum pbl_bt_gatt_error error) {
+  prv_select_client_for_characteristic(subscribed_characteristic);
+  if (s_ancs_client) {
+    prv_handle_subscribe(subscribed_characteristic, subscription_type, error);
+  }
+  prv_restore_gateway_client();
+}
+
+void ancs_handle_read_or_notification(pbl_bt_characteristic_t characteristic, const uint8_t *value,
+                                      size_t value_length, enum pbl_bt_gatt_error error) {
+  prv_select_client_for_characteristic(characteristic);
+  if (s_ancs_client) {
+    prv_handle_read_or_notification(characteristic, value, value_length, error);
+  }
+  prv_restore_gateway_client();
+}
+
+void ancs_handle_write_response(pbl_bt_characteristic_t characteristic,
+                                enum pbl_bt_gatt_error error) {
+  prv_select_client_for_characteristic(characteristic);
+  if (s_ancs_client) {
+    prv_handle_write_response(characteristic, error);
+  }
+  prv_restore_gateway_client();
+}
+#endif
