@@ -173,6 +173,36 @@ static size_t prv_utf8_prefix_length(const char *str, size_t max_length) {
   return length;
 }
 
+//! Copies a device name for display. Apple's logo character (U+F8FF, private use) is not in the
+//! watch fonts and would show as a box, so it is shown as U+1F34E (red apple emoji) instead.
+static void prv_copy_device_name_for_display(char *out, size_t out_size, const char *in) {
+  static const char logo[] = "\xef\xa3\xbf";
+  static const char apple[] = "\xf0\x9f\x8d\x8e";
+  size_t out_len = 0;
+  const char *cursor = in;
+  while (*cursor) {
+    const uint8_t lead = (uint8_t)*cursor;
+    size_t seq_len = (lead < 0x80) ? 1 : ((lead >> 5) == 0x6) ? 2 : ((lead >> 4) == 0xE) ? 3
+                     : ((lead >> 3) == 0x1E) ? 4 : 1;
+    if (strnlen(cursor, seq_len) < seq_len) {
+      break; // Truncated sequence
+    }
+    const char *src = cursor;
+    size_t src_len = seq_len;
+    if (seq_len == 3 && memcmp(cursor, logo, 3) == 0) {
+      src = apple;
+      src_len = 4;
+    }
+    if (out_len + src_len + 1 > out_size) {
+      break;
+    }
+    memcpy(&out[out_len], src, src_len);
+    out_len += src_len;
+    cursor += seq_len;
+  }
+  out[out_len] = '\0';
+}
+
 //! Creates a subtitle attribute carrying the secondary device's name, after the notification's
 //! own subtitle if it has one. Returns nullptr if the name is unknown.
 static ANCSAttribute *prv_create_secondary_subtitle(const ANCSAttribute *subtitle) {
@@ -180,11 +210,14 @@ static ANCSAttribute *prv_create_secondary_subtitle(const ANCSAttribute *subtitl
   if (bonding == PBL_BT_BONDING_ID_INVALID) {
     return nullptr;
   }
-  char name[PBL_BT_DEVICE_NAME_BUFFER_SIZE] = {};
-  if (!bt_persistent_storage_get_ble_pairing_by_id(bonding, nullptr, nullptr, name) ||
-      name[0] == '\0') {
+  char stored_name[PBL_BT_DEVICE_NAME_BUFFER_SIZE] = {};
+  if (!bt_persistent_storage_get_ble_pairing_by_id(bonding, nullptr, nullptr, stored_name) ||
+      stored_name[0] == '\0') {
     return nullptr;
   }
+  // Each replaced logo character grows by one byte.
+  char name[PBL_BT_DEVICE_NAME_BUFFER_SIZE * 2];
+  prv_copy_device_name_for_display(name, sizeof(name), stored_name);
   const size_t name_length = prv_utf8_prefix_length(name, SECONDARY_LABEL_MAX_LENGTH);
 
   static const char separator[] = " \xc2\xb7 "; // " · "
