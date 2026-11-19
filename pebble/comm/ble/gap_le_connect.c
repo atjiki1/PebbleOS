@@ -25,6 +25,10 @@
 #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
 #include <applib/ui/vibes.h>
 #include <kernel/event_loop.h>
+#include <pbl/services/bluetooth/bluetooth_persistent_storage.h>
+#include <pbl/services/bluetooth/pairability.h>
+
+#include "gap_le_slave_reconnect.h"
 #endif
 
 PBL_LOG_MODULE_DECLARE(bt, CONFIG_BT_LOG_LEVEL);
@@ -120,15 +124,30 @@ static bool s_is_connected_as_slave;
 #define GAP_LE_INVALID_CONN_HANDLE (0xFFFF)
 //! Number of links on which the local device is LE Slave.
 static uint8_t s_num_slave_links;
-//! Handle of the first slave link: legacy connection events are only sent for this one, so the
-//! rest of the system keeps seeing a single phone.
+//! The phone's link. Legacy connection events and "connected as slave" follow this link only, so
+//! the rest of the system keeps seeing a single phone.
 static uint16_t s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
+//! The secondary (notification-only) device's link.
+static uint16_t s_secondary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
+static struct pbl_bt_device_internal s_secondary_device;
 
 static void prv_multi_link_vibe_kernel_main_cb(void *data) {
   if ((uintptr_t)data) {
     vibes_double_pulse();
   } else {
     vibes_short_pulse();
+  }
+}
+
+static bool prv_is_secondary_connected(void) {
+  return (s_secondary_slave_handle != GAP_LE_INVALID_CONN_HANDLE);
+}
+
+//! The controller stops advertising whenever a link is set up. Restart the remaining advertising
+//! jobs while another slave link can still be accepted.
+static void prv_refresh_advertising_if_link_available(void) {
+  if (s_num_slave_links < CONFIG_NIMBLE_BLE_MAX_CONNECTIONS) {
+    gap_le_advert_handle_disconnect_as_slave();
   }
 }
 #endif
@@ -333,14 +352,35 @@ void pbl_bt_handle_le_connection_complete_event(const struct pbl_bt_conn_complet
 
 #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
         s_num_slave_links++;
-        PBL_LOG_INFO("Multi-link: slave link up hdl=%u, links=%u", event->handle,
-                     s_num_slave_links);
-        if (s_primary_slave_handle == GAP_LE_INVALID_CONN_HANDLE) {
+        const bool is_secondary_pairing = bt_pairability_is_secondary_pairing();
+        // A new device while the settings menu is open and a phone is bonded: pair it as the
+        // secondary device.
+        const bool is_new_secondary = !event->is_resolved && is_secondary_pairing &&
+                                      bt_persistent_storage_has_ble_ancs_bonding();
+        if (bt_persistent_storage_is_ble_secondary_device(&event->peer_address) ||
+            is_new_secondary) {
+          s_secondary_slave_handle = event->handle;
+          s_secondary_device = event->peer_address;
+          PBL_LOG_INFO("Multi-link: secondary link up hdl=%u, links=%u, new=%d", event->handle,
+                       s_num_slave_links, is_new_secondary);
+          if (is_new_secondary) {
+            pbl_bt_gap_le_security_initiate(&event->peer_address);
+          }
+          if (is_secondary_pairing) {
+            launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)1);
+          }
+          gap_le_slave_reconnect_secondary_update(true /* is_secondary_connected */);
+        } else if (s_primary_slave_handle == GAP_LE_INVALID_CONN_HANDLE) {
           s_primary_slave_handle = event->handle;
+          PBL_LOG_INFO("Multi-link: primary link up hdl=%u, links=%u", event->handle,
+                       s_num_slave_links);
           prv_put_legacy_connection_event(&event->peer_address, true /* connected */);
         } else {
-          launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)1);
+          PBL_LOG_WRN("Multi-link: extra link hdl=%u, links=%u", event->handle,
+                      s_num_slave_links);
         }
+        s_is_connected_as_slave = (s_primary_slave_handle != GAP_LE_INVALID_CONN_HANDLE);
+        prv_refresh_advertising_if_link_available();
 #else
         prv_put_legacy_connection_event(&event->peer_address, true /* connected */);
 #endif
@@ -463,16 +503,25 @@ void pbl_bt_handle_le_disconnection_complete_event(
         if (s_num_slave_links > 0) {
           s_num_slave_links--;
         }
-        PBL_LOG_INFO("Multi-link: slave link down hdl=%u, links=%u", event->handle,
-                     s_num_slave_links);
         if (event->handle == s_primary_slave_handle) {
           s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
+          PBL_LOG_INFO("Multi-link: primary link down hdl=%u, links=%u", event->handle,
+                       s_num_slave_links);
           prv_put_legacy_connection_event(&event->peer_address, false /* disconnected */);
+        } else if (event->handle == s_secondary_slave_handle) {
+          s_secondary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
+          PBL_LOG_INFO("Multi-link: secondary link down hdl=%u, links=%u", event->handle,
+                       s_num_slave_links);
+          if (bt_pairability_is_secondary_pairing()) {
+            launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)0);
+          }
+          gap_le_slave_reconnect_secondary_update(false /* is_secondary_connected */);
         } else {
-          launcher_task_add_callback(prv_multi_link_vibe_kernel_main_cb, (void *)(uintptr_t)0);
+          PBL_LOG_INFO("Multi-link: extra link down hdl=%u, links=%u", event->handle,
+                       s_num_slave_links);
         }
         // "Connected as slave" follows the primary link only, so that reconnection advertising
-        // for the phone still starts while a second device stays connected.
+        // for the phone still starts while the secondary device stays connected.
         s_is_connected_as_slave = (s_primary_slave_handle != GAP_LE_INVALID_CONN_HANDLE);
         gap_le_advert_handle_disconnect_as_slave();
 #else
@@ -837,6 +886,18 @@ static void prv_unregister_intent(GAPLEConnectionIntent *intent,
 // -------------------------------------------------------------------------------------------------
 
 void gap_le_connect_handle_bonding_change(pbl_bt_bonding_id_t bonding_id, BtPersistBondingOp op) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  bt_lock();
+  {
+    if (op == BtPersistBondingOpWillDelete && prv_is_secondary_connected() &&
+        !bt_persistent_storage_has_ble_secondary_bonding()) {
+      // The secondary device was forgotten while connected: drop its link.
+      pbl_bt_gap_le_disconnect(&s_secondary_device);
+    }
+    gap_le_slave_reconnect_secondary_update(prv_is_secondary_connected());
+  }
+  bt_unlock();
+#endif
   // Load from flash outside of the bt_lock() block:
   GAPLEConnectionIntentBonding updated_bonding;
   if (op == BtPersistBondingOpDidChange) {
@@ -987,6 +1048,16 @@ bool gap_le_connect_is_connected_as_slave(void) {
 }
 
 #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+bool gap_le_connect_is_secondary_connected(void) {
+  bool connected;
+  bt_lock();
+  {
+    connected = prv_is_secondary_connected();
+  }
+  bt_unlock();
+  return connected;
+}
+
 uint8_t gap_le_connect_num_slave_links(void) {
   uint8_t num;
   bt_lock();
@@ -1041,6 +1112,7 @@ void gap_le_connect_deinit(void) {
 #if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
     s_num_slave_links = 0;
     s_primary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
+    s_secondary_slave_handle = GAP_LE_INVALID_CONN_HANDLE;
 #endif
   }
   bt_unlock();

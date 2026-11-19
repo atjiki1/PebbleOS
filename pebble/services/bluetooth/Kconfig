@@ -24,15 +24,16 @@ config BLE_GATT_SUBSCRIPTION_DEPTH
       Deeper absorbs notification bursts (fewer drops) at the cost of RAM.
 
 config BT_MULTI_LINK_EXPERIMENT
-    bool "Experimental: accept a second BLE link"
+    bool "Experimental: secondary BLE device next to the phone"
     default n
     depends on !RECOVERY_FW
     help
-      Experiment for multi-device support. Raises the NimBLE link limit to 2,
-      keeps advertising while Settings > Bluetooth is open even with a paired
-      phone, and vibrates (double pulse) when a second device connects, short
-      pulse when it disconnects. The second link is never paired and gets no
-      ANCS/AMS/PPoGATT: it only shows whether the controller accepts it.
+      Experimental multi-device support. Raises the NimBLE link limit to 2
+      and lets a second device (e.g. an iPad) pair as a secondary device
+      while Settings > Bluetooth is open. One phone and one secondary
+      bonding are kept, and the watch advertises for the secondary while it
+      is bonded and disconnected. The secondary link gets no
+      ANCS/AMS/PPoGATT yet.
 
 config BT_ANCS_CLIENT
     bool "ANCS (Apple Notification Center Service) client"

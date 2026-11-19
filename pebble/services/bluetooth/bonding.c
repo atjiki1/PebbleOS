@@ -65,8 +65,15 @@ void pbl_bt_cb_handle_create_bonding(const struct pbl_bt_bonding *bonding,
     return;
   }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  // Storage may have made it the secondary device.
+  const bool is_gateway = bt_persistent_storage_is_ble_ancs_bonding(bonding_id);
+#else
+  const bool is_gateway = bonding->is_gateway;
+#endif
+
   if (launcher_task_is_current_task()) {
-    prv_finalize_create_bonding(bonding_id, addr, bonding->is_gateway);
+    prv_finalize_create_bonding(bonding_id, addr, is_gateway);
     return;
   }
 
@@ -75,7 +82,7 @@ void pbl_bt_cb_handle_create_bonding(const struct pbl_bt_bonding *bonding,
   *context = (CreateBondingContext){
     .bonding_id = bonding_id,
     .addr = *addr,
-    .is_gateway = bonding->is_gateway,
+    .is_gateway = is_gateway,
   };
   launcher_task_add_callback(prv_finalize_create_bonding_cb, context);
 }

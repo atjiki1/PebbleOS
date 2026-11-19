@@ -21,6 +21,9 @@
 //! bt_lock() needs to be taken before accessing this variable.
 static GAPLEAdvertisingJobRef s_reconnect_advert_job;
 static bool s_is_basic_reconnection_enabled;
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static bool s_is_secondary_reconnection_enabled;
+#endif
 static bool s_is_hrm_reconnection_enabled;
 
 typedef enum {
@@ -70,6 +73,11 @@ static ReconnectType prv_current_reconnect_type(void) {
   if (s_is_basic_reconnection_enabled) {
     return ReconnectType_Plain;
   }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (s_is_secondary_reconnection_enabled) {
+    return ReconnectType_Plain;
+  }
+#endif
   return ReconnectType_None;
 }
 
@@ -207,6 +215,19 @@ void gap_le_slave_reconnect_start(void) {
 unlock:
   bt_unlock();
 }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+// -----------------------------------------------------------------------------
+void gap_le_slave_reconnect_secondary_update(bool is_secondary_connected) {
+  bt_lock();
+  {
+    const bool enable =
+        !is_secondary_connected && bt_persistent_storage_has_ble_secondary_bonding();
+    prv_set_and_evaluate(&s_is_secondary_reconnection_enabled, enable);
+  }
+  bt_unlock();
+}
+#endif
 
 #ifdef CONFIG_HRM
 

@@ -144,6 +144,18 @@ struct PBL_PACKED pbl_bt_irk_change {
 int pbl_bt_gap_le_disconnect(const struct pbl_bt_device_internal *peer_address);
 
 /**
+ * @brief Ask the peer to pair or encrypt the connection.
+ *
+ * As peripheral this sends a Security Request.
+ *
+ * @param peer_address The connected peer.
+ * @retval 0 Security was initiated.
+ * @retval -1 There is no connection with @p peer_address.
+ * @return A positive NimBLE error code if security could not be initiated.
+ */
+int pbl_bt_gap_le_security_initiate(const struct pbl_bt_device_internal *peer_address);
+
+/**
  * @brief Called when a connection is established.
  *
  * @param event The connection.

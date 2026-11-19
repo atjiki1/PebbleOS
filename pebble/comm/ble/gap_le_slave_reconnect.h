@@ -22,6 +22,13 @@ void gap_le_slave_reconnect_stop(void);
 //! - When Bluetooth is turned on
 void gap_le_slave_reconnect_start(void);
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Advertises for reconnection of the secondary device while it is bonded and not connected,
+//! independently of the phone's connection state.
+//! @param is_secondary_connected True if the secondary device is currently connected.
+void gap_le_slave_reconnect_secondary_update(bool is_secondary_connected);
+#endif
+
 #ifdef CONFIG_HRM
 
 //! Start advertising for reconnection using a payload containing the Heart Rate Service UUID.
