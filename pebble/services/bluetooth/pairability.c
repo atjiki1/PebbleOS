@@ -106,6 +106,18 @@ void bt_pairability_update_due_to_bonding_change(void) {
   }
 }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static volatile bool s_secondary_pairing;
+
+void bt_pairability_set_secondary_pairing(bool active) {
+  s_secondary_pairing = active;
+}
+
+bool bt_pairability_is_secondary_pairing(void) {
+  return s_secondary_pairing;
+}
+#endif
+
 void bt_pairability_init(void) {
   // Reset cached discoverable state: the advertising infrastructure was torn down
   // before this init, so we must re-drive gap_le_slave_set_discoverable() if needed.

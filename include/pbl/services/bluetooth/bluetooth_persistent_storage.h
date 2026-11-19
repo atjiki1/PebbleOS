@@ -181,6 +181,22 @@ bool bt_persistent_storage_has_ble_ancs_bonding(void);
  */
 bool bt_persistent_storage_has_active_ble_gateway_bonding(void);
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+/**
+ * @brief Check whether a secondary (notification-only) BLE bonding is stored.
+ */
+bool bt_persistent_storage_has_ble_secondary_bonding(void);
+
+/**
+ * @brief Check whether a device is the stored secondary device.
+ *
+ * Reads a RAM cache, so it can be called with bt_lock() held.
+ *
+ * @param device Identity address of the peer.
+ */
+bool bt_persistent_storage_is_ble_secondary_device(const struct pbl_bt_device_internal *device);
+#endif
+
 /**
  * @brief Call a function for each BLE bonding.
  *
