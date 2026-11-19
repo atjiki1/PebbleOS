@@ -186,10 +186,8 @@ static bool prv_select_client_for_callback(ANCSClient *client) {
   return true;
 }
 
-//! UIDs of the secondary device's notifications get this bit, so they can't collide with the
-//! phone's and actions can be routed back.
-#define ANCS_SECONDARY_UID_FLAG (0x80000000UL)
-
+//! UIDs of the secondary device's notifications get ANCS_SECONDARY_UID_FLAG, so they can't
+//! collide with the phone's and actions can be routed back.
 static uint32_t prv_external_uid(uint32_t uid) {
   return prv_is_secondary_client() ? (uid | ANCS_SECONDARY_UID_FLAG) : uid;
 }

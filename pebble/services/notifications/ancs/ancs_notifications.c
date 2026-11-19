@@ -25,6 +25,15 @@
 
 #include <comm/ble/kernel_le_client/ancs/ancs_types.h>
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+#include <string.h>
+
+#include <pbl/bluetooth/types.h>
+#include <pbl/services/bluetooth/bluetooth_persistent_storage.h>
+
+#include <comm/ble/kernel_le_client/ancs/ancs.h>
+#endif
+
 PBL_LOG_MODULE_DECLARE(service_notifications, CONFIG_SERVICE_NOTIFICATIONS_LOG_LEVEL);
 
 static const Uuid uuid_reminders_data_source = UUID_REMINDERS_DATA_SOURCE;
@@ -50,8 +59,11 @@ static void prv_dismiss_notification(const TimelineItem *notification) {
   }
 }
 
-static void prv_handle_new_ancs_notif(TimelineItem *notification, bool alert) {
+static void prv_handle_new_ancs_notif(TimelineItem *notification, bool alert, Uuid *id_out) {
   uuid_generate(&notification->header.id);
+  if (id_out) {
+    *id_out = notification->header.id;
+  }
   if (alert) {
     notifications_add_notification(notification);
   } else {
@@ -79,6 +91,121 @@ static void prv_handle_ancs_update(TimelineItem *notification,
   // we won't use this anywhere, free up the memory
   timeline_item_destroy(notification);
 }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+// -------------------------------------------------------------------------------------------------
+// Multi-link: the phone and the secondary device often post the same notification (iMessage,
+// apps signed in on both). Keep one: a later copy from the other device is dropped, and when the
+// secondary's copy came first, the phone's copy takes its place so actions go to the phone.
+
+#define DUPLICATE_WINDOW_TICKS (30 * PBL_TICK_HZ)
+#define DUPLICATE_CACHE_SIZE   (8)
+//! Longest device name shown on the secondary device's notifications, in bytes.
+#define SECONDARY_LABEL_MAX_LENGTH (24)
+
+typedef struct {
+  uint32_t hash;
+  uint64_t ticks;
+  bool is_secondary;
+  bool has_id;
+  Uuid id;
+} RecentNotification;
+
+static RecentNotification s_recent[DUPLICATE_CACHE_SIZE];
+static uint8_t s_recent_next;
+
+static uint32_t prv_hash_attribute(uint32_t hash, const ANCSAttribute *attr) {
+  // FNV-1a
+  const uint16_t length = attr ? attr->length : 0;
+  for (uint16_t i = 0; i < length; i++) {
+    hash = (hash ^ attr->value[i]) * 16777619u;
+  }
+  return (hash ^ 0xFF) * 16777619u;
+}
+
+static uint32_t prv_hash_notification(ANCSAttribute **notif_attributes) {
+  uint32_t hash = 2166136261u;
+  hash = prv_hash_attribute(hash, notif_attributes[FetchedNotifAttributeIndexAppID]);
+  hash = prv_hash_attribute(hash, notif_attributes[FetchedNotifAttributeIndexTitle]);
+  hash = prv_hash_attribute(hash, notif_attributes[FetchedNotifAttributeIndexSubtitle]);
+  hash = prv_hash_attribute(hash, notif_attributes[FetchedNotifAttributeIndexMessage]);
+  return hash;
+}
+
+//! Finds a recent notification with the same content from the other device.
+static RecentNotification *prv_find_recent_from_other_device(uint32_t hash, bool is_secondary) {
+  const uint64_t now = pbl_uptime_ticks();
+  for (int i = 0; i < DUPLICATE_CACHE_SIZE; i++) {
+    RecentNotification *recent = &s_recent[i];
+    if (recent->ticks && recent->hash == hash && recent->is_secondary != is_secondary &&
+        (now - recent->ticks) < DUPLICATE_WINDOW_TICKS) {
+      return recent;
+    }
+  }
+  return nullptr;
+}
+
+static void prv_remember_recent(uint32_t hash, bool is_secondary, const Uuid *id) {
+  RecentNotification *recent = &s_recent[s_recent_next];
+  s_recent_next = (s_recent_next + 1) % DUPLICATE_CACHE_SIZE;
+  *recent = (RecentNotification){
+    .hash = hash,
+    .ticks = pbl_uptime_ticks(),
+    .is_secondary = is_secondary,
+    .has_id = (id != nullptr),
+  };
+  if (id) {
+    recent->id = *id;
+  }
+}
+
+//! Length of the longest prefix of `str` that fits `max_length` bytes without splitting a UTF-8
+//! sequence.
+static size_t prv_utf8_prefix_length(const char *str, size_t max_length) {
+  size_t length = strlen(str);
+  if (length <= max_length) {
+    return length;
+  }
+  length = max_length;
+  while (length > 0 && (((uint8_t)str[length]) & 0xC0) == 0x80) {
+    length--;
+  }
+  return length;
+}
+
+//! Creates a subtitle attribute carrying the secondary device's name, after the notification's
+//! own subtitle if it has one. Returns nullptr if the name is unknown.
+static ANCSAttribute *prv_create_secondary_subtitle(const ANCSAttribute *subtitle) {
+  const pbl_bt_bonding_id_t bonding = bt_persistent_storage_get_ble_secondary_bonding();
+  if (bonding == PBL_BT_BONDING_ID_INVALID) {
+    return nullptr;
+  }
+  char name[PBL_BT_DEVICE_NAME_BUFFER_SIZE] = {};
+  if (!bt_persistent_storage_get_ble_pairing_by_id(bonding, nullptr, nullptr, name) ||
+      name[0] == '\0') {
+    return nullptr;
+  }
+  const size_t name_length = prv_utf8_prefix_length(name, SECONDARY_LABEL_MAX_LENGTH);
+
+  static const char separator[] = " \xc2\xb7 "; // " · "
+  const size_t subtitle_length = (subtitle && subtitle->length) ? subtitle->length : 0;
+  const size_t separator_length = subtitle_length ? (sizeof(separator) - 1) : 0;
+  const size_t length = subtitle_length + separator_length + name_length;
+
+  ANCSAttribute *attr = pbl_malloc_check(sizeof(ANCSAttribute) + length);
+  attr->id = NotificationAttributeIDSubtitle;
+  attr->length = length;
+  uint8_t *cursor = attr->value;
+  if (subtitle_length) {
+    memcpy(cursor, subtitle->value, subtitle_length);
+    cursor += subtitle_length;
+    memcpy(cursor, separator, separator_length);
+    cursor += separator_length;
+  }
+  memcpy(cursor, name, name_length);
+  return attr;
+}
+#endif
 
 static time_t prv_get_timestamp_from_ancs_date(const ANCSAttribute *date,
                                                const ANCSAttribute *app_id) {
@@ -304,6 +431,10 @@ void ancs_notifications_handle_message(uint32_t uid, ANCSProperty properties,
                                        ANCSAttribute **notif_attributes,
                                        ANCSAttribute **app_attributes) {
   PBL_ASSERTN(notif_attributes && app_attributes);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  // Freed at cleanup, so it must be set before the first jump there.
+  ANCSAttribute *secondary_subtitle = nullptr;
+#endif
 
   const ANCSAttribute *app_id = notif_attributes[FetchedNotifAttributeIndexAppID];
   if (!app_id || app_id->length == 0) {
@@ -339,6 +470,36 @@ void ancs_notifications_handle_message(uint32_t uid, ANCSProperty properties,
     }
   }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  const bool is_secondary = (uid & ANCS_SECONDARY_UID_FLAG) != 0;
+  const uint32_t content_hash = prv_hash_notification(notif_attributes);
+  RecentNotification *duplicate = prv_find_recent_from_other_device(content_hash, is_secondary);
+  // The phone's copy replaces a stored copy from the secondary device.
+  Uuid replace_id = {};
+  bool replace_secondary_copy = false;
+  if (duplicate) {
+    if (is_secondary || !duplicate->has_id) {
+      PBL_LOG_DBG("Dropping ANCS notification also posted by the other device: %" PRIu32, uid);
+      goto cleanup;
+    }
+    replace_id = duplicate->id;
+    replace_secondary_copy = true;
+    duplicate->ticks = 0; // Consumed
+  }
+
+  // Name the secondary device on its notifications.
+  ANCSAttribute *labeled_attributes[NUM_FETCHED_NOTIF_ATTRIBUTES];
+  if (is_secondary) {
+    secondary_subtitle =
+        prv_create_secondary_subtitle(notif_attributes[FetchedNotifAttributeIndexSubtitle]);
+    if (secondary_subtitle) {
+      memcpy(labeled_attributes, notif_attributes, sizeof(labeled_attributes));
+      labeled_attributes[FetchedNotifAttributeIndexSubtitle] = secondary_subtitle;
+      notif_attributes = labeled_attributes;
+    }
+  }
+#endif
+
   // If this is an incoming call, let the phone service handle it
   // It would be nice to handle FaceTime calls with the phone service but it doesn't look like we
   // can.
@@ -373,6 +534,21 @@ void ancs_notifications_handle_message(uint32_t uid, ANCSProperty properties,
   notification->header.silent = ((properties & ANCSProperty_Silent) != 0);
 
   notification_storage_lock();
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  Uuid stored_id = {};
+  bool has_stored_id = false;
+  if (replace_secondary_copy) {
+    TimelineItem existing = {};
+    if (notification_storage_get(&replace_id, &existing)) {
+      CommonTimelineItemHeader secondary_header = existing.header;
+      timeline_item_free_allocated_buffer(&existing);
+      PBL_LOG_DBG("Phone's copy replaces the secondary device's: %" PRIu32, uid);
+      prv_handle_ancs_update(notification, &secondary_header);
+      notification_storage_unlock();
+      goto cleanup;
+    }
+  }
+#endif
   // filter out duplicate notifications
   CommonTimelineItemHeader existing_header;
   if (prv_find_existing_notification(notification, &existing_header)) {
@@ -383,15 +559,28 @@ void ancs_notifications_handle_message(uint32_t uid, ANCSProperty properties,
       goto cleanup;
     }
     PBL_LOG_DBG("Updating ANCS notification: %" PRIu32, uid);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+    stored_id = existing_header.id;
+    has_stored_id = true;
+#endif
     prv_handle_ancs_update(notification, &existing_header);
   } else {
     const bool alert = !is_recovered || (timestamp >= (pbl_realtime() - RECOVERED_ALERT_MAX_AGE_S));
     PBL_LOG_DBG("New ANCS notification: %" PRIu32 " (recovered=%d, alert=%d)", uid, is_recovered,
                 alert);
-    prv_handle_new_ancs_notif(notification, alert);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+    prv_handle_new_ancs_notif(notification, alert, &stored_id);
+    has_stored_id = true;
+#else
+    prv_handle_new_ancs_notif(notification, alert, nullptr);
+#endif
   }
 
   notification_storage_unlock();
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  prv_remember_recent(content_hash, is_secondary, has_stored_id ? &stored_id : nullptr);
+#endif
 
   // if missed call, also add a pin
   if (is_notification_from_phone_app && has_missed_call_property) {
@@ -405,6 +594,9 @@ void ancs_notifications_handle_message(uint32_t uid, ANCSProperty properties,
   }
 
 cleanup:
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  pbl_free(secondary_subtitle);
+#endif
   ios_notif_pref_db_free_prefs(app_notif_prefs);
 }
 
