@@ -32,8 +32,9 @@ config BT_MULTI_LINK_EXPERIMENT
       and lets a second device (e.g. an iPad) pair as a secondary device
       while Settings > Bluetooth is open. One phone and one secondary
       bonding are kept, and the watch advertises for the secondary while it
-      is bonded and disconnected. The secondary link gets no
-      ANCS/AMS/PPoGATT yet.
+      is bonded and disconnected, soliciting ANCS so iOS reconnects without
+      an app. A second ANCS client shows the secondary device's
+      notifications; AMS and PPoGATT stay on the phone only.
 
 config BT_ANCS_CLIENT
     bool "ANCS (Apple Notification Center Service) client"
