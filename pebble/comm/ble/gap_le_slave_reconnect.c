@@ -6,7 +6,10 @@
 #include "gap_le_advert.h"
 #include "gap_le_connect.h"
 
+#include <string.h>
+
 #include <pbl/btutil/bt_uuid.h>
+#include <pbl/kernel/malloc.h>
 #include <pbl/kernel/time.h>
 #include <pbl/kernel/work.h>
 #include <pbl/logging/logging.h>
@@ -29,7 +32,10 @@ static bool s_is_hrm_reconnection_enabled;
 typedef enum {
   ReconnectType_None,  // Not advertising for reconnection
   ReconnectType_Plain, // Advertising for reconnection with empty payload
-  ReconnectType_BleHrm // Advertising for reconnection with HRM payload
+  ReconnectType_BleHrm, // Advertising for reconnection with HRM payload
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  ReconnectType_Ancs, // Advertising for reconnection, soliciting ANCS
+#endif
 } ReconnectType;
 
 //! When the master reconnects and drops repeatedly (e.g. supervision timeouts
@@ -70,14 +76,14 @@ static ReconnectType prv_current_reconnect_type(void) {
   if (s_is_hrm_reconnection_enabled) {
     return ReconnectType_BleHrm;
   }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (s_is_secondary_reconnection_enabled) {
+    return ReconnectType_Ancs;
+  }
+#endif
   if (s_is_basic_reconnection_enabled) {
     return ReconnectType_Plain;
   }
-#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
-  if (s_is_secondary_reconnection_enabled) {
-    return ReconnectType_Plain;
-  }
-#endif
   return ReconnectType_None;
 }
 
@@ -106,7 +112,27 @@ static void prv_evaluate(ReconnectType prev_type) {
 #endif
 
     struct pbl_bt_ad_data *ad;
-    if (use_hrm_payload) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+    const bool use_ancs_payload = (cur_type == ReconnectType_Ancs);
+#else
+    const bool use_ancs_payload = false;
+#endif
+    if (use_ancs_payload) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+      // iOS reconnects to bonded accessories that solicit ANCS without an app.
+      static const uint8_t s_ancs_solicit_payload[] = {
+        // Flags: LE General Discoverable, BR/EDR Not Supported
+        0x02, 0x01, 0x06,
+        // List of 128-bit Service Solicitation UUIDs: ANCS 7905F431-B5CE-4E99-A40F-4B1E122D00D0
+        0x11, 0x15, 0xD0, 0x00, 0x2D, 0x12, 0x1E, 0x4B, 0x0F, 0xA4, 0x99, 0x4E, 0xCE, 0xB5, 0x31,
+        0xF4, 0x05, 0x79,
+      };
+      ad = pbl_malloc_check(sizeof(*ad) + sizeof(s_ancs_solicit_payload));
+      ad->ad_data_length = sizeof(s_ancs_solicit_payload);
+      ad->scan_resp_data_length = 0;
+      memcpy(ad->data, s_ancs_solicit_payload, sizeof(s_ancs_solicit_payload));
+#endif
+    } else if (use_hrm_payload) {
       // Create adv payload with only flags + HR service UUID. This is enough for various mobile
       // fitness apps to be able to reconnect to Pebble as BLE HRM.
       ad = ble_ad_create();
@@ -166,6 +192,8 @@ static void prv_evaluate(ReconnectType prev_type) {
 
     if (use_hrm_payload) {
       ble_ad_destroy(ad);
+    } else if (use_ancs_payload) {
+      pbl_free(ad);
     }
   } else {
     prv_unschedule_adv_if_needed();
