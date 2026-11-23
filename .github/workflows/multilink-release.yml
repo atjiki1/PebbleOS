@@ -161,7 +161,11 @@ jobs:
           set -euo pipefail
           name=$(printf '%s' "${BOARD}" | tr @ _)
           mkdir -p ../out
-          cp build/normal_${name}_*.pbz ../out/
+          # The firmware says ${TAG}; the file name keeps -multilink.
+          for f in build/normal_${name}_*.pbz; do
+            base=$(basename "$f")
+            cp "$f" "../out/${base/_${TAG}_/_${RELEASE}_}"
+          done
           ls -l ../out
           echo "name=${name}" >> "${GITHUB_OUTPUT}"
 
