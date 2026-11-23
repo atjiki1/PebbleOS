@@ -121,9 +121,10 @@ jobs:
             echo "::error::The multi-link patches do not apply to ${TAG}"
             exit 1
           fi
-          # Firmware version: the official one plus ".0-multilink".
-          fw_version="${TAG}.0-multilink"
-          git tag -a "${fw_version}" -m "${fw_version}"
+          # Firmware version: exactly the official one, so the update
+          # server sees it as up to date. Move the tag to the patched HEAD.
+          git tag -d "${TAG}"
+          git tag -a "${TAG}" -m "${RELEASE}"
           git describe
           git log --oneline -9
 
