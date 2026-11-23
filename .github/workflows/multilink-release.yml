@@ -204,6 +204,13 @@ jobs:
           Do not take the official update the app offers: it replaces this firmware."
           if gh release view "${RELEASE}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${RELEASE}" artifacts/*.pbz --clobber -R "${GITHUB_REPOSITORY}"
+            # Drop files from earlier builds that this build did not make.
+            gh release view "${RELEASE}" -R "${GITHUB_REPOSITORY}" --json assets -q '.assets[].name' |
+              while read -r asset; do
+                if [ ! -e "artifacts/${asset}" ]; then
+                  gh release delete-asset "${RELEASE}" "${asset}" -y -R "${GITHUB_REPOSITORY}"
+                fi
+              done
           else
             gh release create "${RELEASE}" artifacts/*.pbz -R "${GITHUB_REPOSITORY}" \
               --target "${GITHUB_SHA}" --title "${RELEASE}" --notes "${notes}"
