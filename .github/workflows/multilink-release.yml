@@ -121,8 +121,9 @@ jobs:
             echo "::error::The multi-link patches do not apply to ${TAG}"
             exit 1
           fi
-          # Firmware version: the official one with a -multilink suffix.
-          git tag -a "${RELEASE}" -m "${RELEASE}"
+          # Firmware version: the official one plus ".0-multilink".
+          fw_version="${TAG}.0-multilink"
+          git tag -a "${fw_version}" -m "${fw_version}"
           git describe
           git log --oneline -9
 
