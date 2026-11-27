@@ -96,6 +96,11 @@ static const char *prv_group_sender_for_item(const TimelineItem *item, char *buf
   return start;
 }
 
+const char *notifications_history_group_key(const TimelineItem *item, char *buffer,
+                                            size_t buffer_size) {
+  return prv_group_sender_for_item(item, buffer, buffer_size);
+}
+
 const char *notifications_history_group_label(const char *sender) {
   const char *separator = strchr(sender, NOTIFICATIONS_HISTORY_GROUP_KEY_SEPARATOR);
   return separator ? separator + 1 : sender;

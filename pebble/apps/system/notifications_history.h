@@ -65,5 +65,9 @@ bool notifications_history_has_collapsed_groups(const NotificationHistory *histo
 bool notifications_history_row_is_collapsed_group(const NotificationHistoryRow *row);
 const Uuid *notifications_history_row_get_latest_id(const NotificationHistoryRow *row);
 
+//! Writes the sender key of @p item; returns it (inside @p buffer) or NULL if it is not grouped
+const char *notifications_history_group_key(const TimelineItem *item, char *buffer,
+                                            size_t buffer_size);
+
 //! The sender to show for a group's sender key
 const char *notifications_history_group_label(const char *sender);
