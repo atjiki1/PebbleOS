@@ -1,0 +1,761 @@
+From 72251cd666602d4bdbc3bead4c3f2bdf903cd38c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 11:53:50 +0900
+Subject: [PATCH 10/10] notifications: show a sender's earlier messages in the
+ popup
+
+With the multi-link experiment, a new setting Popup by Sender (Never,
+1 Day, 1 Week, All) makes the notification popup show the sender's
+earlier notifications from that range, up to 10 messages with their
+times, on one card. The earlier cards of that sender leave the popup,
+and dismissing the card on iOS also dismisses the messages it shows.
+Notifications are still stored one by one, so the oldest ones are
+still the first to go when storage is full.
+
+Assisted-by: LLM
+Signed-off-by: Claude <noreply@anthropic.com>
+---
+ .../alerts_preferences_private.h              |  15 +
+ pebble/apps/system/notifications_history.c    |   5 +
+ pebble/apps/system/notifications_history.h    |   4 +
+ pebble/apps/system/settings/notifications.c   |  40 +++
+ .../notifications/notification_sender_popup.c | 273 ++++++++++++++++++
+ .../notifications/notification_sender_popup.h |  44 +++
+ .../notifications/notification_window.c       |  88 ++++++
+ .../notifications/alerts_preferences.c        |  17 ++
+ .../system_apps/notifications/CMakeLists.txt  |   6 +
+ .../test_notification_sender_popup.c          |  56 ++++
+ third_party/nonfree/pebbleos-nonfree          |   2 +-
+ 11 files changed, 549 insertions(+), 1 deletion(-)
+ create mode 100644 pebble/popups/notifications/notification_sender_popup.c
+ create mode 100644 pebble/popups/notifications/notification_sender_popup.h
+ create mode 100644 tests/pebble/apps/system_apps/notifications/test_notification_sender_popup.c
+
+diff --git a/include/pbl/services/notifications/alerts_preferences_private.h b/include/pbl/services/notifications/alerts_preferences_private.h
+index fafd855..8d4214d 100644
+--- a/include/pbl/services/notifications/alerts_preferences_private.h
++++ b/include/pbl/services/notifications/alerts_preferences_private.h
+@@ -177,6 +177,21 @@ NotificationGroupingRange alerts_preferences_get_notification_grouping_range(voi
+  */
+ void alerts_preferences_set_notification_grouping_range(NotificationGroupingRange range);
+ 
++/**
++ * @brief Get the range within which a notification popup also shows the sender's earlier
++ * notifications.
++ *
++ * @return Range; NotificationGroupingRange_Never if the stored value is invalid.
++ */
++NotificationGroupingRange alerts_preferences_get_notification_popup_grouping_range(void);
++
++/**
++ * @brief Set the notification popup sender range.
++ *
++ * @param range Range.
++ */
++void alerts_preferences_set_notification_popup_grouping_range(NotificationGroupingRange range);
++
+ /** @brief Style of the clock in the notification window status bar. */
+ typedef enum {
+   /** Regular clock (default). */
+diff --git a/pebble/apps/system/notifications_history.c b/pebble/apps/system/notifications_history.c
+index 2354cb2..f16ad3c 100644
+--- a/pebble/apps/system/notifications_history.c
++++ b/pebble/apps/system/notifications_history.c
+@@ -93,6 +93,11 @@ static const char *prv_group_sender_for_item(const TimelineItem *item, char *buf
+   return start;
+ }
+ 
++const char *notifications_history_group_key(const TimelineItem *item, char *buffer,
++                                            size_t buffer_size) {
++  return prv_group_sender_for_item(item, buffer, buffer_size);
++}
++
+ const char *notifications_history_group_label(const char *sender) {
+   const char *separator = strchr(sender, NOTIFICATIONS_HISTORY_GROUP_KEY_SEPARATOR);
+   return separator ? separator + 1 : sender;
+diff --git a/pebble/apps/system/notifications_history.h b/pebble/apps/system/notifications_history.h
+index 78e729c..24b4f56 100644
+--- a/pebble/apps/system/notifications_history.h
++++ b/pebble/apps/system/notifications_history.h
+@@ -65,5 +65,9 @@ bool notifications_history_has_collapsed_groups(const NotificationHistory *histo
+ bool notifications_history_row_is_collapsed_group(const NotificationHistoryRow *row);
+ const Uuid *notifications_history_row_get_latest_id(const NotificationHistoryRow *row);
+ 
++//! Writes the sender key of @p item; returns it (inside @p buffer) or NULL if it is not grouped
++const char *notifications_history_group_key(const TimelineItem *item, char *buffer,
++                                            size_t buffer_size);
++
+ //! The sender to show for a group's sender key
+ const char *notifications_history_group_label(const char *sender);
+diff --git a/pebble/apps/system/settings/notifications.c b/pebble/apps/system/settings/notifications.c
+index b3e159f..7d073ae 100644
+--- a/pebble/apps/system/settings/notifications.c
++++ b/pebble/apps/system/settings/notifications.c
+@@ -39,6 +39,9 @@ enum NotificationsItem {
+   NotificationsItemVibeDelay,
+   NotificationsItemBacklight,
+   NotificationsItemGroupBySender,
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  NotificationsItemPopupBySender,
++#endif
+   NotificationsItemStatusBarStyle,
+   NotificationsItem_Count,
+ };
+@@ -329,6 +332,29 @@ static void prv_notification_grouping_range_menu_push(SettingsNotificationsData
+                             true /* icons_enabled */, s_notification_grouping_range_labels, data);
+ }
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++// Popup by Sender
++////////////////////////
++
++static void prv_notification_popup_grouping_range_menu_select(OptionMenu *option_menu,
++                                                              int selection, void *context) {
++  alerts_preferences_set_notification_popup_grouping_range((NotificationGroupingRange)selection);
++  app_window_stack_remove(&option_menu->window, true /* animated */);
++}
++
++static void prv_notification_popup_grouping_range_menu_push(SettingsNotificationsData *data) {
++  const OptionMenuCallbacks callbacks = {
++    .select = prv_notification_popup_grouping_range_menu_select,
++  };
++  /// Title for the setting that shows a sender's earlier notifications in the popup
++  const char *title = pbl_i18n_noop("Popup by Sender");
++  settings_option_menu_push(title, OptionMenuContentType_SingleLine,
++                            alerts_preferences_get_notification_popup_grouping_range(), &callbacks,
++                            ARRAY_LENGTH(s_notification_grouping_range_labels),
++                            true /* icons_enabled */, s_notification_grouping_range_labels, data);
++}
++#endif
++
+ // Menu Layer Callbacks
+ ////////////////////////
+ 
+@@ -386,6 +412,15 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
+           [alerts_preferences_get_notification_grouping_range()];
+       break;
+     }
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++    case NotificationsItemPopupBySender: {
++      /// Notification settings item for showing a sender's earlier notifications in the popup
++      title = pbl_i18n_noop("Popup by Sender");
++      subtitle = s_notification_grouping_range_labels
++          [alerts_preferences_get_notification_popup_grouping_range()];
++      break;
++    }
++#endif
+     case NotificationsItemStatusBarStyle: {
+       /// String within Settings->Notifications that selects the notification status bar style
+       title = pbl_i18n_noop("Status Bar");
+@@ -435,6 +470,11 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
+     case NotificationsItemGroupBySender:
+       prv_notification_grouping_range_menu_push(data);
+       break;
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++    case NotificationsItemPopupBySender:
++      prv_notification_popup_grouping_range_menu_push(data);
++      break;
++#endif
+     case NotificationsItemStatusBarStyle:
+       prv_status_bar_style_menu_push(data);
+       break;
+diff --git a/pebble/popups/notifications/notification_sender_popup.c b/pebble/popups/notifications/notification_sender_popup.c
+new file mode 100644
+index 0000000..1203ab1
+--- /dev/null
++++ b/pebble/popups/notifications/notification_sender_popup.c
+@@ -0,0 +1,273 @@
++/* SPDX-FileCopyrightText: 2026 Core Devices LLC */
++/* SPDX-License-Identifier: Apache-2.0 */
++
++#include "notification_sender_popup.h"
++
++#include <stdio.h>
++#include <string.h>
++
++#include <pbl/services/clock.h>
++#include <pbl/util/math.h>
++#include <pbl/util/size.h>
++#include <pbl/util/units.h>
++
++time_t notification_sender_popup_range_cutoff(NotificationGroupingRange range, time_t now) {
++  time_t window = 0;
++  if (range == NotificationGroupingRange_OneDay) {
++    window = PBL_SEC_PER_DAY;
++  } else if (range == NotificationGroupingRange_OneWeek) {
++    window = 7 * PBL_SEC_PER_DAY;
++  }
++  if ((window == 0) || (now <= window)) {
++    return 0;
++  }
++  return now - window;
++}
++
++static size_t prv_append_line(char *buffer, size_t size, size_t offset, time_t timestamp,
++                              const char *body, bool newline) {
++  char time_string[16];
++  clock_copy_time_string_timestamp(time_string, sizeof(time_string), timestamp);
++  char *out = (offset < size) ? &buffer[offset] : nullptr;
++  const size_t out_size = (offset < size) ? (size - offset) : 0;
++  const int length = snprintf(out, out_size, "%s%s %s", newline ? "\n" : "", time_string, body);
++  return (length > 0) ? (size_t)length : 0;
++}
++
++size_t notification_sender_popup_format_body(char *buffer, size_t size,
++                                             const NotificationSenderPopupMessage *older,
++                                             int num_older, time_t timestamp, const char *body) {
++  size_t offset = 0;
++  for (int i = 0; i < num_older; i++) {
++    offset += prv_append_line(buffer, size, offset, older[i].timestamp, older[i].body, i > 0);
++  }
++  offset += prv_append_line(buffer, size, offset, timestamp, body, num_older > 0);
++  return offset;
++}
++
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++
++#include <pbl/kernel/time.h>
++#include <pbl/logging/logging.h>
++#include <pbl/services/notifications/notification_storage.h>
++#include <pbl/services/timeline/attribute.h>
++
++#include <applib/applib_malloc.auto.h>
++#include <apps/system/notifications_history.h>
++
++//! Room for one stored string; ANCS bodies are at most 200 bytes plus an ellipsis
++#define STRING_BUFFER_SIZE 256
++
++typedef struct {
++  Uuid id;
++  time_t timestamp;
++  char body[STRING_BUFFER_SIZE];
++} OlderMessage;
++
++typedef struct {
++  char key[NOTIFICATIONS_HISTORY_GROUP_KEY_MAX_LEN + 1];
++  char item_key[NOTIFICATIONS_HISTORY_GROUP_KEY_MAX_LEN + 1];
++  Uuid id;
++  time_t timestamp;
++  int count;
++  OlderMessage messages[NOTIFICATION_SENDER_POPUP_MAX_MESSAGES - 1];
++  char strings[4][STRING_BUFFER_SIZE];
++} Collect;
++
++bool notification_sender_popup_enabled(void) {
++  return alerts_preferences_get_notification_popup_grouping_range() !=
++         NotificationGroupingRange_Never;
++}
++
++static time_t prv_cutoff(void) {
++  return notification_sender_popup_range_cutoff(
++      alerts_preferences_get_notification_popup_grouping_range(), pbl_realtime());
++}
++
++static bool prv_collect_cb(void *data, const CommonTimelineItemHeader *header,
++                           const TimelineItem *item) {
++  Collect *collect = data;
++  if (!item || uuid_equal(&header->id, &collect->id) ||
++      (header->status & (TimelineItemStatusActioned | TimelineItemStatusDismissed)) ||
++      (header->timestamp > collect->timestamp)) {
++    return true;
++  }
++  const char *key =
++      notifications_history_group_key(item, collect->item_key, sizeof(collect->item_key));
++  if (!key || (strcmp(key, collect->key) != 0)) {
++    return true;
++  }
++
++  // Keep the newest ones
++  int slot = collect->count;
++  if (slot == ARRAY_LENGTH(collect->messages)) {
++    slot = 0;
++    for (int i = 1; i < collect->count; i++) {
++      if (collect->messages[i].timestamp < collect->messages[slot].timestamp) {
++        slot = i;
++      }
++    }
++    if (collect->messages[slot].timestamp > header->timestamp) {
++      return true;
++    }
++  } else {
++    collect->count++;
++  }
++  OlderMessage *message = &collect->messages[slot];
++  message->id = header->id;
++  message->timestamp = header->timestamp;
++  strncpy(message->body, attribute_get_string(&item->attr_list, AttributeIdBody, ""),
++          sizeof(message->body) - 1);
++  message->body[sizeof(message->body) - 1] = '\0';
++  return true;
++}
++
++//! Finds the earlier messages of the sender of @p item, oldest first
++static Collect *prv_collect(const TimelineItem *item) {
++  if (!notification_sender_popup_enabled() || (item->header.type != TimelineItemTypeNotification)) {
++    return nullptr;
++  }
++  const time_t cutoff = prv_cutoff();
++  if (item->header.timestamp < cutoff) {
++    return nullptr;
++  }
++
++  Collect *collect = applib_zalloc(sizeof(*collect));
++  if (!collect) {
++    return nullptr;
++  }
++  const char *key =
++      notifications_history_group_key(item, collect->item_key, sizeof(collect->item_key));
++  if (!key) {
++    applib_free(collect);
++    return nullptr;
++  }
++  strncpy(collect->key, key, sizeof(collect->key) - 1);
++  collect->id = item->header.id;
++  collect->timestamp = item->header.timestamp;
++
++  Attribute attributes[] = {
++    {.id = AttributeIdSender, .cstring = collect->strings[0]},
++    {.id = AttributeIdTitle, .cstring = collect->strings[1]},
++    {.id = AttributeIdiOSAppIdentifier, .cstring = collect->strings[2]},
++    {.id = AttributeIdBody, .cstring = collect->strings[3]},
++  };
++  AttributeList attr_list = {
++    .num_attributes = ARRAY_LENGTH(attributes),
++    .attributes = attributes,
++  };
++  notification_storage_iterate_strings_after(cutoff, &attr_list, STRING_BUFFER_SIZE, prv_collect_cb,
++                                             collect);
++
++  // Oldest first
++  for (int i = 1; i < collect->count; i++) {
++    OlderMessage tmp = collect->messages[i];
++    int j = i - 1;
++    while ((j >= 0) && (collect->messages[j].timestamp > tmp.timestamp)) {
++      collect->messages[j + 1] = collect->messages[j];
++      j--;
++    }
++    collect->messages[j + 1] = tmp;
++  }
++  return collect;
++}
++
++TimelineItem *notification_sender_popup_merge(TimelineItem *item) {
++  Collect *collect = prv_collect(item);
++  if (!collect) {
++    return item;
++  }
++  if (collect->count == 0) {
++    applib_free(collect);
++    return item;
++  }
++
++  NotificationSenderPopupMessage older[ARRAY_LENGTH(collect->messages)];
++  for (int i = 0; i < collect->count; i++) {
++    older[i] = (NotificationSenderPopupMessage){
++      .timestamp = collect->messages[i].timestamp,
++      .body = collect->messages[i].body,
++    };
++  }
++  const char *body = attribute_get_string(&item->attr_list, AttributeIdBody, "");
++  const size_t length = notification_sender_popup_format_body(nullptr, 0, older, collect->count,
++                                                              item->header.timestamp, body);
++  char *merged = applib_malloc(length + 1);
++
++  const uint8_t num_attributes = item->attr_list.num_attributes;
++  Attribute *attributes = applib_malloc(sizeof(Attribute) * (num_attributes + 1));
++  TimelineItem *merged_item = nullptr;
++  if (merged && attributes) {
++    notification_sender_popup_format_body(merged, length + 1, older, collect->count,
++                                          item->header.timestamp, body);
++    memcpy(attributes, item->attr_list.attributes, sizeof(Attribute) * num_attributes);
++    AttributeList attr_list = {
++      .num_attributes = num_attributes,
++      .attributes = attributes,
++    };
++    Attribute *body_attribute = attribute_find(&attr_list, AttributeIdBody);
++    if (!body_attribute) {
++      body_attribute = &attributes[attr_list.num_attributes++];
++      body_attribute->id = AttributeIdBody;
++    }
++    body_attribute->cstring = merged;
++
++    merged_item = timeline_item_create_with_attributes(
++        item->header.timestamp, item->header.duration, item->header.type, item->header.layout,
++        &attr_list, &item->action_group);
++  }
++  applib_free(attributes);
++  applib_free(merged);
++  applib_free(collect);
++
++  if (!merged_item) {
++    PBL_LOG_WRN("Could not merge the sender's notifications");
++    return item;
++  }
++  merged_item->header = item->header;
++  timeline_item_destroy(item);
++  return merged_item;
++}
++
++int notification_sender_popup_older_ids(const TimelineItem *item, Uuid *ids, int max_ids) {
++  Collect *collect = prv_collect(item);
++  if (!collect) {
++    return 0;
++  }
++  const int count = MIN(collect->count, max_ids);
++  for (int i = 0; i < count; i++) {
++    ids[i] = collect->messages[i].id;
++  }
++  applib_free(collect);
++  return count;
++}
++
++bool notification_sender_popup_same_sender(const Uuid *a, const Uuid *b) {
++  if (!notification_sender_popup_enabled()) {
++    return false;
++  }
++  const time_t cutoff = prv_cutoff();
++  char *keys = applib_zalloc(2 * (NOTIFICATIONS_HISTORY_GROUP_KEY_MAX_LEN + 1));
++  if (!keys) {
++    return false;
++  }
++  const char *found[2] = {};
++  const Uuid *ids[2] = {a, b};
++  for (int i = 0; i < 2; i++) {
++    TimelineItem item;
++    if (!notification_storage_get(ids[i], &item)) {
++      break;
++    }
++    if ((item.header.type == TimelineItemTypeNotification) && (item.header.timestamp >= cutoff)) {
++      char *buffer = &keys[i * (NOTIFICATIONS_HISTORY_GROUP_KEY_MAX_LEN + 1)];
++      found[i] = notifications_history_group_key(&item, buffer,
++                                                 NOTIFICATIONS_HISTORY_GROUP_KEY_MAX_LEN + 1);
++    }
++    timeline_item_free_allocated_buffer(&item);
++  }
++  const bool same = found[0] && found[1] && (strcmp(found[0], found[1]) == 0);
++  applib_free(keys);
++  return same;
++}
++
++#endif
+diff --git a/pebble/popups/notifications/notification_sender_popup.h b/pebble/popups/notifications/notification_sender_popup.h
+new file mode 100644
+index 0000000..0805f7f
+--- /dev/null
++++ b/pebble/popups/notifications/notification_sender_popup.h
+@@ -0,0 +1,44 @@
++/* SPDX-FileCopyrightText: 2026 Core Devices LLC */
++/* SPDX-License-Identifier: Apache-2.0 */
++
++#pragma once
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <time.h>
++
++#include <pbl/services/notifications/alerts_preferences_private.h>
++#include <pbl/services/timeline/item.h>
++
++//! Most messages shown on one sender card, the new one included
++#define NOTIFICATION_SENDER_POPUP_MAX_MESSAGES 10
++
++//! Oldest timestamp a range covers at @p now; 0 for All
++time_t notification_sender_popup_range_cutoff(NotificationGroupingRange range, time_t now);
++
++//! One earlier message of the sender
++typedef struct {
++  time_t timestamp;
++  const char *body;
++} NotificationSenderPopupMessage;
++
++//! Writes "<time> <body>" lines, oldest first, ending with the newest message.
++//! @p older is sorted oldest first. Returns the length needed, like snprintf().
++size_t notification_sender_popup_format_body(char *buffer, size_t size,
++                                             const NotificationSenderPopupMessage *older,
++                                             int num_older, time_t timestamp, const char *body);
++
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++//! Whether the popup shows earlier messages of the sender
++bool notification_sender_popup_enabled(void);
++
++//! Replaces @p item with a copy whose body also holds the sender's earlier messages, or returns
++//! @p item when there are none. The returned item is freed with timeline_item_destroy().
++TimelineItem *notification_sender_popup_merge(TimelineItem *item);
++
++//! Writes the IDs of the earlier messages that a card for @p item shows; returns their number.
++int notification_sender_popup_older_ids(const TimelineItem *item, Uuid *ids, int max_ids);
++
++//! Whether notifications @p a and @p b are from the same sender within the popup range
++bool notification_sender_popup_same_sender(const Uuid *a, const Uuid *b);
++#endif
+diff --git a/pebble/popups/notifications/notification_window.c b/pebble/popups/notifications/notification_window.c
+index c4d4532..d1f4a2e 100644
+--- a/pebble/popups/notifications/notification_window.c
++++ b/pebble/popups/notifications/notification_window.c
+@@ -5,6 +5,9 @@
+ 
+ #include "notification_window_private.h"
+ #include "notifications_presented_list.h"
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++#include "notification_sender_popup.h"
++#endif
+ 
+ #include <inttypes.h>
+ #include <stdio.h>
+@@ -93,6 +96,9 @@ static void prv_handle_notification_removed_common(Uuid *, NotificationType);
+ static bool prv_should_pop_due_to_inactivity(void);
+ 
+ static void prv_do_notification_vibe(NotificationWindowData *data, Uuid *id);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++static void prv_dismiss_older_from_same_sender(const Uuid *id);
++#endif
+ 
+ /////////////////////
+ // Helpers
+@@ -529,6 +535,11 @@ PBL_T_STATIC LayoutLayer *prv_get_layout_handler(SwapLayer *swap_layer, int8_t r
+       PBL_LOG_ERR("Failed to read notification");
+       goto cleanup;
+     }
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++    if (data->is_modal) {
++      item = notification_sender_popup_merge(item);
++    }
++#endif
+   } else if (type == NotificationReminder) {
+     // validate reminder
+     int rv = reminder_db_read_item(item, id);
+@@ -1503,6 +1514,13 @@ static void prv_handle_action_result(PebbleSysNotificationActionResult *action_r
+ 
+   // the notification has been acted on. Remove it.
+   NotificationWindowData *data = &s_notification_window_data;
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  if ((action_result->type == ActionResultTypeSuccessANCSDismiss) && data->is_modal &&
++      !data->window_frozen && notification_sender_popup_enabled() &&
++      uuid_equal(&action_result->id, notifications_presented_list_current())) {
++    prv_dismiss_older_from_same_sender(&action_result->id);
++  }
++#endif
+   notification_storage_set_status(&action_result->id, TimelineItemStatusActioned);
+   data->notifications_modified = true;
+ 
+@@ -1591,6 +1609,65 @@ static bool prv_notification_is_phone_silent(Uuid *id) {
+   return is_phone_silent;
+ }
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++//! The new card shows the sender's earlier messages, so drop their own cards
++static int prv_remove_presented_from_same_sender(Uuid *id) {
++  if (!notification_sender_popup_enabled()) {
++    return 0;
++  }
++  const int count = notifications_presented_list_count();
++  if (count == 0) {
++    return 0;
++  }
++  Uuid *same = applib_malloc(sizeof(Uuid) * count);
++  if (!same) {
++    return 0;
++  }
++  int num_same = 0;
++  Uuid *first = notifications_presented_list_first();
++  for (int i = 0; i < count; i++) {
++    Uuid *presented = notifications_presented_list_relative(first, i);
++    if (!uuid_is_invalid(presented) &&
++        (notifications_presented_list_get_type(presented) == NotificationMobile) &&
++        !uuid_equal(presented, id) && notification_sender_popup_same_sender(presented, id)) {
++      same[num_same++] = *presented;
++    }
++  }
++  for (int i = 0; i < num_same; i++) {
++    notifications_presented_list_remove(&same[i]);
++  }
++  applib_free(same);
++  return num_same;
++}
++
++//! Dismissing a sender card also dismisses the earlier messages it shows
++static void prv_dismiss_older_from_same_sender(const Uuid *id) {
++  TimelineItem item;
++  if (!notification_storage_get(id, &item)) {
++    return;
++  }
++  Uuid older[NOTIFICATION_SENDER_POPUP_MAX_MESSAGES - 1];
++  const int num_older = notification_sender_popup_older_ids(&item, older, ARRAY_LENGTH(older));
++  timeline_item_free_allocated_buffer(&item);
++
++  for (int i = 0; i < num_older; i++) {
++    TimelineItem older_item;
++    if (!notification_storage_get(&older[i], &older_item)) {
++      continue;
++    }
++    const TimelineItemAction *dismiss = timeline_item_find_dismiss_action(&older_item);
++    if (dismiss) {
++      timeline_enable_ancs_bulk_action_mode(true);
++      timeline_enable_async_remote_action_mode(true);
++      timeline_invoke_action(&older_item, dismiss, nullptr);
++      timeline_enable_async_remote_action_mode(false);
++      timeline_enable_ancs_bulk_action_mode(false);
++    }
++    timeline_item_free_allocated_buffer(&older_item);
++  }
++}
++#endif
++
+ static void prv_handle_notification_added_common(Uuid *id, NotificationType type) {
+   NotificationWindowData *data = &s_notification_window_data;
+   prv_log_notification_vibe("received", id);
+@@ -1625,8 +1702,19 @@ static void prv_handle_notification_added_common(Uuid *id, NotificationType type
+   bool is_new = !window_stack_contains_window(window_stack, &data->window);
+   bool in_view = window_is_on_screen(&data->window);
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  const bool removed_same_sender =
++      (type == NotificationMobile) && (prv_remove_presented_from_same_sender(id) > 0);
++#endif
++
+   prv_notification_window_add_notification(id, type);
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  if (removed_same_sender && !is_new && !in_view) {
++    prv_reload_swap_layer(data);
++  }
++#endif
++
+   if (is_new) {
+     data->first_notif_loaded = false;
+     prv_show_peek_for_notification(data, id, true /* is_first_notification */);
+diff --git a/pebble/services/notifications/alerts_preferences.c b/pebble/services/notifications/alerts_preferences.c
+index d442c37..8a47b51 100644
+--- a/pebble/services/notifications/alerts_preferences.c
++++ b/pebble/services/notifications/alerts_preferences.c
+@@ -118,6 +118,10 @@ static bool s_notification_dismissal_sync = false;
+ #define PREF_KEY_NOTIF_GROUPING_RANGE "notifGroupingRange"
+ static NotificationGroupingRange s_notification_grouping_range = NotificationGroupingRange_Never;
+ 
++#define PREF_KEY_NOTIF_POPUP_GROUPING_RANGE "notifPopupGroupingRange"
++static NotificationGroupingRange s_notification_popup_grouping_range =
++    NotificationGroupingRange_Never;
++
+ #define PREF_KEY_NOTIF_STATUS_BAR_STYLE "notifStatusBarStyle"
+ static NotificationStatusBarStyle s_notification_status_bar_style =
+     NotificationStatusBarStyle_Default;
+@@ -484,6 +488,7 @@ void alerts_preferences_init(void) {
+   RESTORE_PREF(PREF_KEY_NOTIF_RESPECT_PHONE_SILENCE, s_notification_respect_phone_silence);
+   RESTORE_PREF(PREF_KEY_NOTIF_DISMISSAL_SYNC, s_notification_dismissal_sync);
+   RESTORE_PREF(PREF_KEY_NOTIF_GROUPING_RANGE, s_notification_grouping_range);
++  RESTORE_PREF(PREF_KEY_NOTIF_POPUP_GROUPING_RANGE, s_notification_popup_grouping_range);
+   RESTORE_PREF(PREF_KEY_NOTIF_STATUS_BAR_STYLE, s_notification_status_bar_style);
+   RESTORE_PREF(PREF_KEY_NOTIF_TEXT_SIZE, s_notification_content_size);
+   RESTORE_PREF(PREF_KEY_DND_AUTO_DISMISS, s_dnd_auto_dismiss);
+@@ -610,6 +615,17 @@ void alerts_preferences_set_notification_grouping_range(NotificationGroupingRang
+   SET_PREF(PREF_KEY_NOTIF_GROUPING_RANGE, s_notification_grouping_range);
+ }
+ 
++NotificationGroupingRange alerts_preferences_get_notification_popup_grouping_range(void) {
++  return (s_notification_popup_grouping_range < NotificationGroupingRangeCount)
++             ? s_notification_popup_grouping_range
++             : NotificationGroupingRange_Never;
++}
++
++void alerts_preferences_set_notification_popup_grouping_range(NotificationGroupingRange range) {
++  s_notification_popup_grouping_range = range;
++  SET_PREF(PREF_KEY_NOTIF_POPUP_GROUPING_RANGE, s_notification_popup_grouping_range);
++}
++
+ NotificationStatusBarStyle alerts_preferences_get_notification_status_bar_style(void) {
+   return s_notification_status_bar_style;
+ }
+@@ -1003,6 +1019,7 @@ void alerts_preferences_handle_blob_db_event(PebbleBlobDBEvent *event) {
+   RELOAD_IF_MATCH(PREF_KEY_NOTIF_RESPECT_PHONE_SILENCE, s_notification_respect_phone_silence);
+   RELOAD_IF_MATCH(PREF_KEY_NOTIF_DISMISSAL_SYNC, s_notification_dismissal_sync);
+   RELOAD_IF_MATCH(PREF_KEY_NOTIF_GROUPING_RANGE, s_notification_grouping_range);
++  RELOAD_IF_MATCH(PREF_KEY_NOTIF_POPUP_GROUPING_RANGE, s_notification_popup_grouping_range);
+   RELOAD_IF_MATCH(PREF_KEY_NOTIF_STATUS_BAR_STYLE, s_notification_status_bar_style);
+   RELOAD_IF_MATCH(PREF_KEY_NOTIF_TEXT_SIZE, s_notification_content_size);
+   RELOAD_IF_MATCH(PREF_KEY_DND_MOTION_BACKLIGHT, s_dnd_motion_backlight);
+diff --git a/tests/pebble/apps/system_apps/notifications/CMakeLists.txt b/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
+index 7461e3a..8f47f99 100644
+--- a/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
++++ b/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
+@@ -15,3 +15,9 @@ pbl_clar_test(test_notifications_history_ios
+   DEFINES CONFIG_BT_MULTI_LINK_EXPERIMENT=1
+   OVERRIDES dummy_board
+ )
++
++pbl_clar_test(test_notification_sender_popup
++  SOURCES
++    pebble/popups/notifications/notification_sender_popup.c
++  OVERRIDES dummy_board
++)
+diff --git a/tests/pebble/apps/system_apps/notifications/test_notification_sender_popup.c b/tests/pebble/apps/system_apps/notifications/test_notification_sender_popup.c
+new file mode 100644
+index 0000000..57320a1
+--- /dev/null
++++ b/tests/pebble/apps/system_apps/notifications/test_notification_sender_popup.c
+@@ -0,0 +1,56 @@
++/* SPDX-FileCopyrightText: 2026 Core Devices LLC */
++/* SPDX-License-Identifier: Apache-2.0 */
++
++#include <stdio.h>
++#include <string.h>
++
++#include <clar.h>
++#include <popups/notifications/notification_sender_popup.h>
++
++size_t clock_copy_time_string_timestamp(char *buffer, uint8_t size, time_t timestamp) {
++  const int minutes = (int)((timestamp / 60) % (24 * 60));
++  return (size_t)snprintf(buffer, size, "%d:%02d", minutes / 60, minutes % 60);
++}
++
++void test_notification_sender_popup__range_cutoff(void) {
++  const time_t now = 10 * 24 * 3600;
++  cl_assert_equal_i(notification_sender_popup_range_cutoff(NotificationGroupingRange_All, now), 0);
++  cl_assert_equal_i(notification_sender_popup_range_cutoff(NotificationGroupingRange_Never, now),
++                    0);
++  cl_assert_equal_i(notification_sender_popup_range_cutoff(NotificationGroupingRange_OneDay, now),
++                    now - 24 * 3600);
++  cl_assert_equal_i(notification_sender_popup_range_cutoff(NotificationGroupingRange_OneWeek, now),
++                    now - 7 * 24 * 3600);
++  cl_assert_equal_i(notification_sender_popup_range_cutoff(NotificationGroupingRange_OneWeek, 100),
++                    0);
++}
++
++void test_notification_sender_popup__single_message_has_time(void) {
++  char buffer[64];
++  const size_t length =
++      notification_sender_popup_format_body(buffer, sizeof(buffer), nullptr, 0, 9 * 3600, "Hi");
++  cl_assert_equal_s(buffer, "9:00 Hi");
++  cl_assert_equal_i(length, strlen("9:00 Hi"));
++}
++
++void test_notification_sender_popup__older_messages_come_first(void) {
++  const NotificationSenderPopupMessage older[] = {
++    {.timestamp = 9 * 3600, .body = "Where are you?"},
++    {.timestamp = 9 * 3600 + 60, .body = "Lunch?"},
++  };
++  char buffer[128];
++  notification_sender_popup_format_body(buffer, sizeof(buffer), older, 2, 10 * 3600, "12:00 ok?");
++  cl_assert_equal_s(buffer, "9:00 Where are you?\n9:01 Lunch?\n10:00 12:00 ok?");
++}
++
++void test_notification_sender_popup__length_without_buffer(void) {
++  const NotificationSenderPopupMessage older[] = {
++    {.timestamp = 0, .body = "a"},
++  };
++  const size_t length = notification_sender_popup_format_body(nullptr, 0, older, 1, 60, "b");
++  cl_assert_equal_i(length, strlen("0:00 a\n0:01 b"));
++
++  char small[8];
++  notification_sender_popup_format_body(small, sizeof(small), older, 1, 60, "b");
++  cl_assert_equal_s(small, "0:00 a\n");
++}
+diff --git a/third_party/nonfree/pebbleos-nonfree b/third_party/nonfree/pebbleos-nonfree
+index 5ab558e..8482325 160000
+--- a/third_party/nonfree/pebbleos-nonfree
++++ b/third_party/nonfree/pebbleos-nonfree
+@@ -1 +1 @@
+-Subproject commit 5ab558e55e43b93a51ec9509b6e7d7418d500598
++Subproject commit 8482325ed10f3c727010287e3c702fef6b154a4e
+-- 
+2.43.0
+
