@@ -1,4 +1,4 @@
-From 72251cd666602d4bdbc3bead4c3f2bdf903cd38c Mon Sep 17 00:00:00 2001
+From 65e9ab33595a7bba14da4f98394b84123c572ae9 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 27 Nov 2026 11:53:50 +0900
 Subject: [PATCH 10/10] notifications: show a sender's earlier messages in the
@@ -58,10 +58,10 @@ index fafd855..8d4214d 100644
  typedef enum {
    /** Regular clock (default). */
 diff --git a/pebble/apps/system/notifications_history.c b/pebble/apps/system/notifications_history.c
-index 2354cb2..f16ad3c 100644
+index 33ec128..7bf969d 100644
 --- a/pebble/apps/system/notifications_history.c
 +++ b/pebble/apps/system/notifications_history.c
-@@ -93,6 +93,11 @@ static const char *prv_group_sender_for_item(const TimelineItem *item, char *buf
+@@ -96,6 +96,11 @@ static const char *prv_group_sender_for_item(const TimelineItem *item, char *buf
    return start;
  }
  
