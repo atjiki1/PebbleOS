@@ -166,6 +166,10 @@ jobs:
             base=$(basename "$f")
             cp "$f" "../out/${base/_${TAG}_/_${RELEASE}_}"
           done
+          # The strings of this firmware, for the language pack builds
+          if [ "${name}" = "obelix_pvt" ]; then
+            cp build/pebbleos.pot ../out/
+          fi
           ls -l ../out
           echo "name=${name}" >> "${GITHUB_OUTPUT}"
 
@@ -201,9 +205,12 @@ jobs:
           Pebble Round 2: getafix_*.pbz (not tested on a watch yet).
 
           Install: Pebble app > Devices > watch > Firmware Update Debug > Sideload FW.
-          Do not take the official update the app offers: it replaces this firmware."
+          Do not take the official update the app offers: it replaces this firmware.
+
+          Korean language pack: https://github.com/atjiki1/PebbleOS-language/releases
+          pebbleos.pot lists the strings of this firmware."
           if gh release view "${RELEASE}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE}" artifacts/*.pbz --clobber -R "${GITHUB_REPOSITORY}"
+            gh release upload "${RELEASE}" artifacts/* --clobber -R "${GITHUB_REPOSITORY}"
             # Drop files from earlier builds that this build did not make.
             gh release view "${RELEASE}" -R "${GITHUB_REPOSITORY}" --json assets -q '.assets[].name' |
               while read -r asset; do
@@ -212,7 +219,7 @@ jobs:
                 fi
               done
           else
-            gh release create "${RELEASE}" artifacts/*.pbz -R "${GITHUB_REPOSITORY}" \
+            gh release create "${RELEASE}" artifacts/* -R "${GITHUB_REPOSITORY}" \
               --target "${GITHUB_SHA}" --title "${RELEASE}" --notes "${notes}"
           fi
 
