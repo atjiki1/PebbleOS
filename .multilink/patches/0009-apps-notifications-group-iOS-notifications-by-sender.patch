@@ -1,0 +1,281 @@
+From 2e5c7a70a4b632b93c7d58b5fb95766ab196dfe8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 27 Nov 2026 10:04:30 +0900
+Subject: [PATCH] apps/notifications: group iOS notifications by sender
+
+With the multi-link experiment, Group by Sender also covers ANCS
+notifications from the iPhone and the secondary iPad. The group key is
+the iOS app identifier and the sender, so the same name in two apps
+stays in two groups; only the sender is shown.
+
+Assisted-by: LLM
+Signed-off-by: Claude <noreply@anthropic.com>
+---
+ pebble/apps/system/notifications.c            |  11 +-
+ pebble/apps/system/notifications_history.c    |  39 ++++++-
+ pebble/apps/system/notifications_history.h    |   7 ++
+ .../system_apps/notifications/CMakeLists.txt  |   8 ++
+ .../test_notifications_history_ios.c          | 108 ++++++++++++++++++
+ 5 files changed, 167 insertions(+), 6 deletions(-)
+ create mode 100644 tests/pebble/apps/system_apps/notifications/test_notifications_history_ios.c
+
+diff --git a/pebble/apps/system/notifications.c b/pebble/apps/system/notifications.c
+index 2b27834..3e06b67 100644
+--- a/pebble/apps/system/notifications.c
++++ b/pebble/apps/system/notifications.c
+@@ -118,9 +118,15 @@ static void prv_load_notification_storage(NotificationsData *data) {
+ 
+   char sender[ATTRIBUTE_TITLE_MAX_LEN + 1];
+   char title[ATTRIBUTE_TITLE_MAX_LEN + 1];
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  char app_id[ATTRIBUTE_TITLE_MAX_LEN + 1];
++#endif
+   Attribute attributes[] = {
+     {.id = AttributeIdSender, .cstring = sender},
+     {.id = AttributeIdTitle, .cstring = title},
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++    {.id = AttributeIdiOSAppIdentifier, .cstring = app_id},
++#endif
+   };
+   AttributeList attr_list = {
+     .num_attributes = ARRAY_LENGTH(attributes),
+@@ -310,7 +316,8 @@ static void prv_group_window_load(Window *window) {
+   NotificationGroupWindow *group_window = window_get_user_data(window);
+   GRect sender_frame = window->layer.bounds;
+   sender_frame.size.h = MENU_CELL_BASIC_HEADER_HEIGHT;
+-  text_layer_init_with_parameters(&group_window->sender_layer, &sender_frame, group_window->sender,
++  text_layer_init_with_parameters(&group_window->sender_layer, &sender_frame,
++                                  notifications_history_group_label(group_window->sender),
+                                   fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD), GColorBlack,
+                                   GColorWhite,
+                                   PBL_IF_RECT_ELSE(GTextAlignmentLeft, GTextAlignmentCenter),
+@@ -708,7 +715,7 @@ static int16_t prv_get_cell_height(struct MenuLayer *menu_layer, MenuIndex *cell
+ }
+ 
+ static const char *prv_get_group_title(NotificationsData *data, const NotificationHistoryRow *row) {
+-  const char *sender = row->group.sender;
++  const char *sender = notifications_history_group_label(row->group.sender);
+   /// Notification sender followed by the number of grouped notifications
+   const char *format = pbl_i18n_get("%s (%u)", data);
+   const int title_length = snprintf(nullptr, 0, format, sender, (unsigned int)row->group.count);
+diff --git a/pebble/apps/system/notifications_history.c b/pebble/apps/system/notifications_history.c
+index e6c3302..2354cb2 100644
+--- a/pebble/apps/system/notifications_history.c
++++ b/pebble/apps/system/notifications_history.c
+@@ -39,10 +39,16 @@ static const char *prv_group_sender_for_item(const TimelineItem *item, char *buf
+                                              size_t buffer_size) {
+   static const Uuid s_android_notifications_source = UUID_NOTIFICATIONS_DATA_SOURCE;
+ 
+-  if (timeline_item_is_ancs_notif(item) ||
+-      !uuid_equal(&item->header.parent_id, &s_android_notifications_source)) {
++  const bool is_ancs = timeline_item_is_ancs_notif(item);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  if (!is_ancs && !uuid_equal(&item->header.parent_id, &s_android_notifications_source)) {
+     return nullptr;
+   }
++#else
++  if (is_ancs || !uuid_equal(&item->header.parent_id, &s_android_notifications_source)) {
++    return nullptr;
++  }
++#endif
+ 
+   const char *sender = attribute_get_string(&item->attr_list, AttributeIdSender, "");
+   const bool from_title = IS_EMPTY_STRING(sender);
+@@ -64,7 +70,32 @@ static const char *prv_group_sender_for_item(const TimelineItem *item, char *buf
+     }
+   }
+ 
+-  return IS_EMPTY_STRING(start) ? nullptr : start;
++  if (IS_EMPTY_STRING(start)) {
++    return nullptr;
++  }
++
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  // iOS: keep the same name in different apps apart, "<app id>\x1f<sender>"
++  const char *app_id = attribute_get_string(&item->attr_list, AttributeIdiOSAppIdentifier, "");
++  if (is_ancs && !IS_EMPTY_STRING(app_id)) {
++    const size_t app_id_len = strlen(app_id);
++    const size_t sender_len = strlen(start);
++    if (app_id_len + 1 + sender_len + 1 > buffer_size) {
++      return start;
++    }
++    memmove(&buffer[app_id_len + 1], start, sender_len + 1);
++    memcpy(buffer, app_id, app_id_len);
++    buffer[app_id_len] = NOTIFICATIONS_HISTORY_GROUP_KEY_SEPARATOR;
++    return buffer;
++  }
++#endif
++
++  return start;
++}
++
++const char *notifications_history_group_label(const char *sender) {
++  const char *separator = strchr(sender, NOTIFICATIONS_HISTORY_GROUP_KEY_SEPARATOR);
++  return separator ? separator + 1 : sender;
+ }
+ 
+ static NotificationHistoryRow *prv_find_group(NotificationHistory *history, const char *sender) {
+@@ -176,7 +207,7 @@ void notifications_history_add_item(NotificationHistory *history, const Timeline
+   if (notifications_history_is_hidden(&item->header)) {
+     return;
+   }
+-  char buffer[ATTRIBUTE_TITLE_MAX_LEN + 1];
++  char buffer[NOTIFICATIONS_HISTORY_GROUP_KEY_MAX_LEN + 1];
+   const char *sender = nullptr;
+   if (history->group_by_sender && (item->header.timestamp >= history->grouping_cutoff)) {
+     sender = prv_group_sender_for_item(item, buffer, sizeof(buffer));
+diff --git a/pebble/apps/system/notifications_history.h b/pebble/apps/system/notifications_history.h
+index aae0cad..78e729c 100644
+--- a/pebble/apps/system/notifications_history.h
++++ b/pebble/apps/system/notifications_history.h
+@@ -9,6 +9,10 @@
+ #include <pbl/services/timeline/item.h>
+ #include <pbl/util/list.h>
+ 
++//! Separates the app from the sender in an iOS group key
++#define NOTIFICATIONS_HISTORY_GROUP_KEY_SEPARATOR '\x1f'
++#define NOTIFICATIONS_HISTORY_GROUP_KEY_MAX_LEN   (2 * ATTRIBUTE_TITLE_MAX_LEN + 1)
++
+ typedef struct NotificationHistoryEntry {
+   Uuid id;
+   time_t timestamp;
+@@ -60,3 +64,6 @@ NotificationHistoryRow *notifications_history_get_row(const NotificationHistory
+ bool notifications_history_has_collapsed_groups(const NotificationHistory *history);
+ bool notifications_history_row_is_collapsed_group(const NotificationHistoryRow *row);
+ const Uuid *notifications_history_row_get_latest_id(const NotificationHistoryRow *row);
++
++//! The sender to show for a group's sender key
++const char *notifications_history_group_label(const char *sender);
+diff --git a/tests/pebble/apps/system_apps/notifications/CMakeLists.txt b/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
+index 7db0ee9..7461e3a 100644
+--- a/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
++++ b/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
+@@ -7,3 +7,11 @@ pbl_clar_test(test_notifications_history
+     lib/util/string.c
+   OVERRIDES dummy_board
+ )
++
++pbl_clar_test(test_notifications_history_ios
++  SOURCES
++    pebble/apps/system/notifications_history.c
++    lib/util/string.c
++  DEFINES CONFIG_BT_MULTI_LINK_EXPERIMENT=1
++  OVERRIDES dummy_board
++)
+diff --git a/tests/pebble/apps/system_apps/notifications/test_notifications_history_ios.c b/tests/pebble/apps/system_apps/notifications/test_notifications_history_ios.c
+new file mode 100644
+index 0000000..6531347
+--- /dev/null
++++ b/tests/pebble/apps/system_apps/notifications/test_notifications_history_ios.c
+@@ -0,0 +1,108 @@
++/* SPDX-FileCopyrightText: 2026 Aliaksandr Karnilovich */
++/* SPDX-License-Identifier: Apache-2.0 */
++
++#include <pbl/services/timeline/attribute.h>
++#include <pbl/services/timeline/timeline.h>
++
++#include <apps/system/notifications_history.h>
++#include <clar.h>
++#include <fake_pbl_malloc.h>
++
++static NotificationHistory s_history;
++
++bool alerts_preferences_get_notification_dismissal_sync(void) {
++  return false;
++}
++
++const char *attribute_get_string(const AttributeList *attr_list, AttributeId id,
++                                 char *default_value) {
++  for (uint8_t i = 0; i < attr_list->num_attributes; i++) {
++    if (attr_list->attributes[i].id == id) {
++      return attr_list->attributes[i].cstring;
++    }
++  }
++  return default_value;
++}
++
++bool timeline_item_is_ancs_notif(const TimelineItem *item) {
++  return item->header.ancs_notif;
++}
++
++static Uuid prv_id(uint8_t value) {
++  return UuidMake(value, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++static void prv_add_ios(uint8_t id, time_t timestamp, const char *app_id, const char *title) {
++  Attribute attributes[] = {
++    {.id = AttributeIdTitle, .cstring = (char *)title},
++    {.id = AttributeIdiOSAppIdentifier, .cstring = (char *)app_id},
++  };
++  TimelineItem item = {
++    .header =
++        {
++          .id = prv_id(id),
++          .timestamp = timestamp,
++          .type = TimelineItemTypeNotification,
++          .ancs_notif = true,
++        },
++    .attr_list = {
++      .num_attributes = app_id ? 2 : 1,
++      .attributes = attributes,
++    },
++  };
++  notifications_history_add_item(&s_history, &item);
++}
++
++static NotificationHistoryRow *prv_row(uint16_t index) {
++  return notifications_history_get_row(&s_history, index);
++}
++
++void test_notifications_history_ios__initialize(void) {
++  fake_pbl_malloc_clear_tracking();
++  notifications_history_init(&s_history, true, 0);
++}
++
++void test_notifications_history_ios__cleanup(void) {
++  notifications_history_deinit(&s_history);
++  fake_pbl_malloc_check_net_allocs();
++  fake_pbl_malloc_clear_tracking();
++}
++
++void test_notifications_history_ios__same_app_and_sender_form_one_group(void) {
++  prv_add_ios(1, 100, "com.iwilab.KakaoTalk", "Anna");
++  prv_add_ios(2, 200, "com.iwilab.KakaoTalk", "Anna");
++
++  cl_assert_equal_i(notifications_history_get_row_count(&s_history), 1);
++  cl_assert(prv_row(0)->is_group);
++  cl_assert_equal_i(prv_row(0)->group.count, 2);
++  cl_assert_equal_s(notifications_history_group_label(prv_row(0)->group.sender), "Anna");
++}
++
++void test_notifications_history_ios__same_sender_in_other_apps_stays_apart(void) {
++  prv_add_ios(1, 100, "com.iwilab.KakaoTalk", "Anna");
++  prv_add_ios(2, 200, "com.apple.MobileSMS", "Anna");
++  prv_add_ios(3, 300, "com.iwilab.KakaoTalk", "Anna");
++
++  cl_assert_equal_i(notifications_history_get_row_count(&s_history), 2);
++  cl_assert(prv_row(0)->is_group);
++  cl_assert_equal_i(prv_row(0)->group.count, 2);
++  cl_assert(prv_row(1)->is_group);
++  cl_assert_equal_i(prv_row(1)->group.count, 1);
++  cl_assert_equal_s(notifications_history_group_label(prv_row(1)->group.sender), "Anna");
++}
++
++void test_notifications_history_ios__missing_app_id_groups_by_sender(void) {
++  prv_add_ios(1, 100, nullptr, "Anna");
++  prv_add_ios(2, 200, nullptr, "Anna");
++
++  cl_assert_equal_i(notifications_history_get_row_count(&s_history), 1);
++  cl_assert_equal_s(notifications_history_group_label(prv_row(0)->group.sender), "Anna");
++}
++
++void test_notifications_history_ios__removing_last_member_removes_group(void) {
++  prv_add_ios(1, 100, "com.iwilab.KakaoTalk", "Anna");
++  Uuid id = prv_id(1);
++
++  cl_assert(notifications_history_remove(&s_history, &id));
++  cl_assert_equal_i(notifications_history_get_row_count(&s_history), 0);
++}
+-- 
+2.43.0
+

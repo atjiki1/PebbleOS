@@ -6,10 +6,12 @@ official PebbleOS release (`git am -3`), built with
 
 They let a Pebble Time 2 / Round 2 stay connected to the phone and a
 secondary iOS device (e.g. an iPad) at once, and show the secondary device's
-notifications (ANCS), with duplicates removed.
+notifications (ANCS), with duplicates removed. Group by Sender also
+groups the iOS notifications (0009).
 
-Source branch: `multi-link-experiment`. To update the patches:
+Source branches: `multi-link-experiment` (0001-0008) and `ml-grouping`
+(the series on top of the latest release, 0001-0009). To update the patches:
 
-    git format-patch <base>..multi-link-experiment -o .multilink/patches
+    git format-patch <tag>..ml-grouping -o .multilink/patches
 
 Notes, tests and history: `~/pebble-sync+2` on the owner's Mac.
