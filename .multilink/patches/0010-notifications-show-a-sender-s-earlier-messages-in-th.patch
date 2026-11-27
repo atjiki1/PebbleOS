@@ -1,4 +1,4 @@
-From 65e9ab33595a7bba14da4f98394b84123c572ae9 Mon Sep 17 00:00:00 2001
+From f7b969a8ab79ce99601bcb138957c3ff8f419a5c Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 27 Nov 2026 11:53:50 +0900
 Subject: [PATCH 10/10] notifications: show a sender's earlier messages in the
@@ -489,7 +489,7 @@ index 0000000..0805f7f
 +bool notification_sender_popup_same_sender(const Uuid *a, const Uuid *b);
 +#endif
 diff --git a/pebble/popups/notifications/notification_window.c b/pebble/popups/notifications/notification_window.c
-index c4d4532..d1f4a2e 100644
+index 34ca2cd..3097da3 100644
 --- a/pebble/popups/notifications/notification_window.c
 +++ b/pebble/popups/notifications/notification_window.c
 @@ -5,6 +5,9 @@
@@ -524,7 +524,7 @@ index c4d4532..d1f4a2e 100644
    } else if (type == NotificationReminder) {
      // validate reminder
      int rv = reminder_db_read_item(item, id);
-@@ -1503,6 +1514,13 @@ static void prv_handle_action_result(PebbleSysNotificationActionResult *action_r
+@@ -1513,6 +1524,13 @@ static void prv_handle_action_result(PebbleSysNotificationActionResult *action_r
  
    // the notification has been acted on. Remove it.
    NotificationWindowData *data = &s_notification_window_data;
@@ -538,7 +538,7 @@ index c4d4532..d1f4a2e 100644
    notification_storage_set_status(&action_result->id, TimelineItemStatusActioned);
    data->notifications_modified = true;
  
-@@ -1591,6 +1609,65 @@ static bool prv_notification_is_phone_silent(Uuid *id) {
+@@ -1601,6 +1619,65 @@ static bool prv_notification_is_phone_silent(Uuid *id) {
    return is_phone_silent;
  }
  
@@ -604,7 +604,7 @@ index c4d4532..d1f4a2e 100644
  static void prv_handle_notification_added_common(Uuid *id, NotificationType type) {
    NotificationWindowData *data = &s_notification_window_data;
    prv_log_notification_vibe("received", id);
-@@ -1625,8 +1702,19 @@ static void prv_handle_notification_added_common(Uuid *id, NotificationType type
+@@ -1635,8 +1712,19 @@ static void prv_handle_notification_added_common(Uuid *id, NotificationType type
    bool is_new = !window_stack_contains_window(window_stack, &data->window);
    bool in_view = window_is_on_screen(&data->window);
  

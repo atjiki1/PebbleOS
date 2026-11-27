@@ -1,4 +1,4 @@
-From 82a0c577aace049924b1431006dc13085b4c7baa Mon Sep 17 00:00:00 2001
+From 9040c879c3e14c0084ebcc6a273ea36dd6de0654 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 27 Nov 2026 10:04:30 +0900
 Subject: [PATCH 09/10] apps/notifications: group iOS notifications by sender
@@ -8,19 +8,26 @@ notifications from the iPhone and the secondary iPad. The group key is
 the iOS app identifier and the sender, so the same name in two apps
 stays in two groups; only the sender is shown.
 
-Assisted-by: LLM
+While grouping is on, a notification opened from the list shows only
+itself, and a group shows only its own messages; Back returns to the
+list. New notifications are not added to such a view.
+
 Signed-off-by: Claude <noreply@anthropic.com>
+Assisted-by: LLM
 ---
- pebble/apps/system/notifications.c            |  11 +-
+ pebble/apps/system/notifications.c            |  34 ++++-
  pebble/apps/system/notifications_history.c    |  46 ++++++-
  pebble/apps/system/notifications_history.h    |   7 +
+ .../notifications/notification_window.c       |  15 +++
+ .../notifications/notification_window.h       |   5 +
+ .../notification_window_private.h             |   4 +
  .../system_apps/notifications/CMakeLists.txt  |   8 ++
  .../test_notifications_history_ios.c          | 125 ++++++++++++++++++
- 5 files changed, 189 insertions(+), 8 deletions(-)
+ 8 files changed, 236 insertions(+), 8 deletions(-)
  create mode 100644 tests/pebble/apps/system_apps/notifications/test_notifications_history_ios.c
 
 diff --git a/pebble/apps/system/notifications.c b/pebble/apps/system/notifications.c
-index 2b27834..3e06b67 100644
+index 2b27834..da805ba 100644
 --- a/pebble/apps/system/notifications.c
 +++ b/pebble/apps/system/notifications.c
 @@ -118,9 +118,15 @@ static void prv_load_notification_storage(NotificationsData *data) {
@@ -39,7 +46,19 @@ index 2b27834..3e06b67 100644
    };
    AttributeList attr_list = {
      .num_attributes = ARRAY_LENGTH(attributes),
-@@ -310,7 +316,8 @@ static void prv_group_window_load(Window *window) {
+@@ -240,7 +246,11 @@ static void prv_add_row_notifications(const NotificationHistoryRow *row) {
+ 
+ static bool prv_push_group_notification_window(const NotificationGroupWindow *group_window,
+                                                uint16_t index) {
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  notification_window_init_history_subset();
++#else
+   notification_window_init_history(false);
++#endif
+   if (notification_window_is_modal()) {
+     return false;
+   }
+@@ -310,7 +320,8 @@ static void prv_group_window_load(Window *window) {
    NotificationGroupWindow *group_window = window_get_user_data(window);
    GRect sender_frame = window->layer.bounds;
    sender_frame.size.h = MENU_CELL_BASIC_HEADER_HEIGHT;
@@ -49,7 +68,40 @@ index 2b27834..3e06b67 100644
                                    fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD), GColorBlack,
                                    GColorWhite,
                                    PBL_IF_RECT_ELSE(GTextAlignmentLeft, GTextAlignmentCenter),
-@@ -708,7 +715,7 @@ static int16_t prv_get_cell_height(struct MenuLayer *menu_layer, MenuIndex *cell
+@@ -394,6 +405,17 @@ static bool prv_push_notification_window(NotificationsData *data) {
+   return true;
+ }
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++static void prv_push_single_notification_window(const Uuid *id) {
++  notification_window_init_history_subset();
++  if (notification_window_is_modal()) {
++    return;
++  }
++  notification_window_add_notification_by_id((Uuid *)id);
++  notification_window_show();
++}
++#endif
++
+ ///////////////////
+ // Confirm Dialog
+ 
+@@ -656,6 +678,14 @@ static void prv_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, vo
+     return;
+   }
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  // Grouped by sender: a single row opens just that notification
++  if (notifications_data->history.group_by_sender) {
++    prv_push_single_notification_window(notifications_history_row_get_latest_id(row));
++    return;
++  }
++#endif
++
+   bool success = prv_push_notification_window(notifications_data);
+   if (!success) {
+     // Bail if a notification came in ahead of us and created a modal window
+@@ -708,7 +738,7 @@ static int16_t prv_get_cell_height(struct MenuLayer *menu_layer, MenuIndex *cell
  }
  
  static const char *prv_get_group_title(NotificationsData *data, const NotificationHistoryRow *row) {
@@ -167,6 +219,71 @@ index aae0cad..78e729c 100644
 +
 +//! The sender to show for a group's sender key
 +const char *notifications_history_group_label(const char *sender);
+diff --git a/pebble/popups/notifications/notification_window.c b/pebble/popups/notifications/notification_window.c
+index c4d4532..34ca2cd 100644
+--- a/pebble/popups/notifications/notification_window.c
++++ b/pebble/popups/notifications/notification_window.c
+@@ -1425,7 +1425,17 @@ void notification_window_init(bool is_modal) {
+ 
+ void notification_window_init_history(bool allow_dismiss_all) {
+   prv_init_notification_window(false, allow_dismiss_all);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  s_notification_window_data.history_subset = false;
++#endif
++}
++
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++void notification_window_init_history_subset(void) {
++  prv_init_notification_window(false, false /* allow_dismiss_all */);
++  s_notification_window_data.history_subset = true;
+ }
++#endif
+ 
+ void notification_window_show() {
+   if (s_notification_window_data.is_modal) {
+@@ -1762,6 +1772,11 @@ void app_notification_window_add_new_notification_by_id(Uuid *id) {
+   if (!s_in_use || data->is_modal) {
+     return;
+   }
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  if (data->history_subset) {
++    return;
++  }
++#endif
+ 
+   bool should_focus = (app_window_stack_get_top_window() == &data->window);
+   notification_window_add_notification_by_id(id);
+diff --git a/pebble/popups/notifications/notification_window.h b/pebble/popups/notifications/notification_window.h
+index a1fe914..27c6e69 100644
+--- a/pebble/popups/notifications/notification_window.h
++++ b/pebble/popups/notifications/notification_window.h
+@@ -14,6 +14,11 @@ void notification_window_init(bool is_modal);
+ 
+ void notification_window_init_history(bool allow_dismiss_all);
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++//! Opens the history window on a chosen set; new notifications are not added to it
++void notification_window_init_history_subset(void);
++#endif
++
+ void notification_window_show(void);
+ 
+ bool notification_window_is_modal(void);
+diff --git a/pebble/popups/notifications/notification_window_private.h b/pebble/popups/notifications/notification_window_private.h
+index 849a718..24530e0 100644
+--- a/pebble/popups/notifications/notification_window_private.h
++++ b/pebble/popups/notifications/notification_window_private.h
+@@ -20,6 +20,10 @@ typedef struct NotificationWindowData {
+   bool pop_timer_is_final;     // true, if pop_timer_id cannot be rescheduled anymore
+ 
+   bool is_modal;
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  //! History window showing a chosen set only (one sender, or one notification)
++  bool history_subset;
++#endif
+   bool allow_dismiss_all;
+   bool window_frozen; // Don't pop when performing an action via a hotkey until the action completes
+   bool first_notif_loaded;
 diff --git a/tests/pebble/apps/system_apps/notifications/CMakeLists.txt b/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
 index 7db0ee9..7461e3a 100644
 --- a/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
