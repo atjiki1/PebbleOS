@@ -20,6 +20,10 @@ typedef struct NotificationWindowData {
   bool pop_timer_is_final;     // true, if pop_timer_id cannot be rescheduled anymore
 
   bool is_modal;
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  //! History window showing a chosen set only (one sender, or one notification)
+  bool history_subset;
+#endif
   bool allow_dismiss_all;
   bool window_frozen; // Don't pop when performing an action via a hotkey until the action completes
   bool first_notif_loaded;

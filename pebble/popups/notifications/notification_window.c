@@ -1425,7 +1425,17 @@ void notification_window_init(bool is_modal) {
 
 void notification_window_init_history(bool allow_dismiss_all) {
   prv_init_notification_window(false, allow_dismiss_all);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  s_notification_window_data.history_subset = false;
+#endif
 }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+void notification_window_init_history_subset(void) {
+  prv_init_notification_window(false, false /* allow_dismiss_all */);
+  s_notification_window_data.history_subset = true;
+}
+#endif
 
 void notification_window_show() {
   if (s_notification_window_data.is_modal) {
@@ -1762,6 +1772,11 @@ void app_notification_window_add_new_notification_by_id(Uuid *id) {
   if (!s_in_use || data->is_modal) {
     return;
   }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (data->history_subset) {
+    return;
+  }
+#endif
 
   bool should_focus = (app_window_stack_get_top_window() == &data->window);
   notification_window_add_notification_by_id(id);

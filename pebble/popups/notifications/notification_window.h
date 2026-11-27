@@ -14,6 +14,11 @@ void notification_window_init(bool is_modal);
 
 void notification_window_init_history(bool allow_dismiss_all);
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Opens the history window on a chosen set; new notifications are not added to it
+void notification_window_init_history_subset(void);
+#endif
+
 void notification_window_show(void);
 
 bool notification_window_is_modal(void);

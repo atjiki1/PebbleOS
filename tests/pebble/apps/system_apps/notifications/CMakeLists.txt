@@ -7,3 +7,11 @@ pbl_clar_test(test_notifications_history
     lib/util/string.c
   OVERRIDES dummy_board
 )
+
+pbl_clar_test(test_notifications_history_ios
+  SOURCES
+    pebble/apps/system/notifications_history.c
+    lib/util/string.c
+  DEFINES CONFIG_BT_MULTI_LINK_EXPERIMENT=1
+  OVERRIDES dummy_board
+)
