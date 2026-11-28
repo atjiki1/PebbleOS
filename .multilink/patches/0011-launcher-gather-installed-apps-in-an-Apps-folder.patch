@@ -1,0 +1,536 @@
+From bd59c4b900c14701e46a419cd8b973a8a4b26a5b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 28 Nov 2026 20:17:55 +0900
+Subject: [PATCH 11/11] launcher: gather installed apps in an Apps folder
+
+With the multi-link experiment, the launcher lists the built-in apps
+and an Apps row right after Settings; the row opens a list of the
+installed apps sorted by name. The row is hidden while no app is
+installed. After an app launched from the folder exits, the launcher
+opens the folder again.
+
+The order set in the phone app still applies to the built-in apps.
+
+Assisted-by: LLM
+Signed-off-by: Claude <noreply@anthropic.com>
+---
+ .../apps/system/launcher/default/launcher.c   | 263 +++++++++++++++++-
+ .../apps/system/launcher/default/menu_layer.c |  87 +++++-
+ .../apps/system/launcher/default/menu_layer.h |  17 ++
+ 3 files changed, 359 insertions(+), 8 deletions(-)
+
+diff --git a/pebble/apps/system/launcher/default/launcher.c b/pebble/apps/system/launcher/default/launcher.c
+index 62731c0e..77c8b0b0 100644
+--- a/pebble/apps/system/launcher/default/launcher.c
++++ b/pebble/apps/system/launcher/default/launcher.c
+@@ -18,11 +18,36 @@
+ #include <shell/normal/app_idle_timeout.h>
+ #include <shell/prefs.h>
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++#include <pbl/i18n/i18n.h>
++
++#include <process_management/pebble_process_info.h>
++#include <apps/system_app_ids.h>
++#include <resource/resource.h>
++#include <resource/resource_ids.auto.h>
++
++//! The Apps folder: installed apps, by name
++typedef struct LauncherFolderWindowData {
++  Window window;
++  LauncherMenuLayer launcher_menu_layer;
++  bool is_open;
++} LauncherFolderWindowData;
++#endif
++
+ typedef struct LauncherAppWindowData {
+   Window window;
+   LauncherMenuLayer launcher_menu_layer;
+   AppMenuDataSource app_menu_data_source;
+   EventServiceInfo pref_change_event_info;
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  AppMenuDataSource folder_data_source;
++  AppMenuNode folder_node;
++  //! List positions of the folder's apps in name order
++  uint16_t *folder_order;
++  uint16_t folder_order_count;
++  bool folder_order_valid;
++  LauncherFolderWindowData *folder;
++#endif
+ } LauncherAppWindowData;
+ 
+ typedef struct LauncherAppPersistedData {
+@@ -34,6 +59,16 @@ typedef struct LauncherAppPersistedData {
+ 
+ static LauncherAppPersistedData s_launcher_app_persisted_data;
+ 
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++typedef struct LauncherFolderPersistedData {
++  //! The folder was open when an app was launched from it
++  bool open;
++  LauncherMenuLayerSelectionState selection_state;
++} LauncherFolderPersistedData;
++
++static LauncherFolderPersistedData s_launcher_folder_persisted_data;
++#endif
++
+ /////////////////////////////
+ // AppFocusService handlers
+ 
+@@ -41,6 +76,12 @@ static void prv_did_focus(bool in_focus) {
+   LauncherAppWindowData *data = app_state_get_user_data();
+   if (in_focus) {
+     launcher_menu_layer_set_selection_animations_enabled(&data->launcher_menu_layer, true);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++    if (data->folder && data->folder->is_open) {
++      launcher_menu_layer_set_selection_animations_enabled(&data->folder->launcher_menu_layer,
++                                                           true);
++    }
++#endif
+   }
+ }
+ 
+@@ -48,12 +89,23 @@ static void prv_will_focus(bool in_focus) {
+   LauncherAppWindowData *data = app_state_get_user_data();
+   if (!in_focus) {
+     launcher_menu_layer_set_selection_animations_enabled(&data->launcher_menu_layer, false);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++    if (data->folder && data->folder->is_open) {
++      launcher_menu_layer_set_selection_animations_enabled(&data->folder->launcher_menu_layer,
++                                                           false);
++    }
++#endif
+   }
+ }
+ 
+ static void prv_pref_change_handler([[maybe_unused]] PebbleEvent *event, void *context) {
+   LauncherAppWindowData *data = context;
+   launcher_menu_layer_update_content_size(&data->launcher_menu_layer);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  if (data->folder && data->folder->is_open) {
++    launcher_menu_layer_update_content_size(&data->folder->launcher_menu_layer);
++  }
++#endif
+ }
+ 
+ ////////////////////////////////
+@@ -62,9 +114,196 @@ static void prv_pref_change_handler([[maybe_unused]] PebbleEvent *event, void *c
+ static bool prv_app_filter_callback([[maybe_unused]] AppMenuDataSource *source,
+                                     AppInstallEntry *entry) {
+   // Skip watchfaces and hidden apps
+-  return (!app_install_entry_is_watchface(entry) && !app_install_entry_is_hidden((entry)));
++  return (!app_install_entry_is_watchface(entry) && !app_install_entry_is_hidden((entry))
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++          // Installed apps live in the Apps folder
++          && !app_install_id_from_app_db(entry->install_id)
++#endif
++  );
++}
++
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++static bool prv_folder_filter_callback([[maybe_unused]] AppMenuDataSource *source,
++                                       AppInstallEntry *entry) {
++  return (!app_install_entry_is_watchface(entry) && !app_install_entry_is_hidden(entry) &&
++          app_install_id_from_app_db(entry->install_id));
++}
++
++//! Case-insensitive for ASCII; other bytes compare as they are, so Hangul sorts after Latin
++static int prv_compare_names(const char *a, const char *b) {
++  while (*a && *b) {
++    unsigned char ca = (unsigned char)*a++;
++    unsigned char cb = (unsigned char)*b++;
++    if ((ca >= 'A') && (ca <= 'Z')) {
++      ca += 'a' - 'A';
++    }
++    if ((cb >= 'A') && (cb <= 'Z')) {
++      cb += 'a' - 'A';
++    }
++    if (ca != cb) {
++      return ca - cb;
++    }
++  }
++  return (unsigned char)*a - (unsigned char)*b;
++}
++
++static void prv_folder_build_order(LauncherAppWindowData *data) {
++  AppMenuDataSource *source = &data->folder_data_source;
++  const uint16_t count = app_menu_data_source_get_count(source);
++  app_free(data->folder_order);
++  data->folder_order = count ? app_malloc(count * sizeof(uint16_t)) : nullptr;
++  data->folder_order_count = data->folder_order ? count : 0;
++  data->folder_order_valid = true;
++
++  AppMenuNode **nodes =
++      data->folder_order_count ? app_malloc(data->folder_order_count * sizeof(*nodes)) : nullptr;
++  if (!nodes) {
++    data->folder_order_count = 0;
++    return;
++  }
++  AppMenuNode *node = source->list;
++  for (uint16_t i = 0; (i < data->folder_order_count) && node; i++) {
++    nodes[i] = node;
++    data->folder_order[i] = i;
++    node = (AppMenuNode *)list_get_next((ListNode *)node);
++  }
++  // Insertion sort by name; folders hold few apps
++  for (uint16_t i = 1; i < data->folder_order_count; i++) {
++    const uint16_t position = data->folder_order[i];
++    int j = i - 1;
++    while ((j >= 0) && (prv_compare_names(nodes[data->folder_order[j]]->name,
++                                          nodes[position]->name) > 0)) {
++      data->folder_order[j + 1] = data->folder_order[j];
++      j--;
++    }
++    data->folder_order[j + 1] = position;
++  }
++  app_free(nodes);
++}
++
++static uint16_t prv_folder_transform_index([[maybe_unused]] AppMenuDataSource *source,
++                                           uint16_t index, void *context) {
++  LauncherAppWindowData *data = context;
++  if (!data->folder_order_valid) {
++    prv_folder_build_order(data);
++  }
++  return (index < data->folder_order_count) ? data->folder_order[index] : index;
++}
++
++static void prv_folder_open(void *context);
++
++static void prv_folder_update_row(LauncherAppWindowData *data) {
++  const bool has_apps = (app_menu_data_source_get_count(&data->folder_data_source) > 0);
++  launcher_menu_layer_set_folder_row(&data->launcher_menu_layer,
++                                     has_apps ? &data->folder_node : nullptr, APP_ID_SETTINGS,
++                                     prv_folder_open, data);
++}
++
++static void prv_folder_data_changed(void *context) {
++  LauncherAppWindowData *data = context;
++  data->folder_order_valid = false;
++  prv_folder_update_row(data);
++  launcher_menu_layer_reload_data(&data->launcher_menu_layer);
++  if (data->folder && data->folder->is_open) {
++    launcher_menu_layer_reload_data(&data->folder->launcher_menu_layer);
++  }
++}
++
++static void prv_folder_window_load(Window *window) {
++  LauncherAppWindowData *data = window_get_user_data(window);
++  LauncherFolderWindowData *folder = data->folder;
++
++  LauncherMenuLayer *launcher_menu_layer = &folder->launcher_menu_layer;
++  launcher_menu_layer_init(launcher_menu_layer, &data->folder_data_source);
++  launcher_menu_layer_set_click_config_onto_window(launcher_menu_layer, window);
++  layer_add_child(window_get_root_layer(window), launcher_menu_layer_get_layer(launcher_menu_layer));
++
++  if (s_launcher_folder_persisted_data.open) {
++    launcher_menu_layer_set_selection_state(launcher_menu_layer,
++                                            &s_launcher_folder_persisted_data.selection_state);
++  }
++  s_launcher_folder_persisted_data.open = false;
++  launcher_menu_layer_set_selection_animations_enabled(launcher_menu_layer, true);
++}
++
++static void prv_folder_window_unload(Window *window) {
++  LauncherAppWindowData *data = window_get_user_data(window);
++  LauncherFolderWindowData *folder = data->folder;
++  LauncherMenuLayer *launcher_menu_layer = &folder->launcher_menu_layer;
++
++  // Come back to the folder after an app launched from it
++  s_launcher_folder_persisted_data.open = launcher_menu_layer->launched_app;
++  launcher_menu_layer_get_selection_state(launcher_menu_layer,
++                                          &s_launcher_folder_persisted_data.selection_state);
++  if (launcher_menu_layer->launched_app) {
++    launcher_menu_layer_get_selection_vertical_range(
++        launcher_menu_layer, &s_launcher_app_persisted_data.draw_state.selection_vertical_range);
++  }
++
++  folder->is_open = false;
++  launcher_menu_layer_deinit(launcher_menu_layer);
++}
++
++static void prv_folder_push(LauncherAppWindowData *data, bool animated) {
++  if (!data->folder) {
++    data->folder = app_zalloc_check(sizeof(*data->folder));
++  }
++  if (data->folder->is_open) {
++    return;
++  }
++  data->folder->launcher_menu_layer = (LauncherMenuLayer){};
++  data->folder->is_open = true;
++  Window *window = &data->folder->window;
++  window_init(window, WINDOW_NAME("Launcher Apps"));
++  window_set_user_data(window, data);
++  window_set_window_handlers(window, &(WindowHandlers){
++                                       .load = prv_folder_window_load,
++                                       .unload = prv_folder_window_unload,
++                                     });
++  app_window_stack_push(window, animated);
++}
++
++static void prv_folder_open(void *context) {
++  prv_folder_push(context, true /* animated */);
+ }
+ 
++static void prv_folder_init(LauncherAppWindowData *data) {
++  app_menu_data_source_init(&data->folder_data_source,
++                            &(AppMenuDataSourceCallbacks){
++                              .changed = prv_folder_data_changed,
++                              .filter = prv_folder_filter_callback,
++                              .transform_index = prv_folder_transform_index,
++                            },
++                            data);
++  data->folder_node = (AppMenuNode){
++    .install_id = INSTALL_ID_INVALID,
++    .app_num = SYSTEM_APP,
++    .icon_resource_id = RESOURCE_ID_MENU_LAYER_GENERIC_WATCHAPP_ICON,
++    /// Launcher item that holds the installed apps
++    .name = (char *)pbl_i18n_get("Apps", data),
++    .visibility = ProcessVisibilityShown,
++    .sdk_version =
++        {
++          .major = PROCESS_INFO_CURRENT_SDK_VERSION_MAJOR,
++          .minor = PROCESS_INFO_CURRENT_SDK_VERSION_MINOR,
++        },
++  };
++  prv_folder_update_row(data);
++}
++
++static void prv_folder_deinit(LauncherAppWindowData *data) {
++  app_menu_data_source_deinit(&data->folder_data_source);
++  app_free(data->folder_order);
++  data->folder_order = nullptr;
++  // Windows unload from the top, so the folder is closed by now
++  if (data->folder && !data->folder->is_open) {
++    app_free(data->folder);
++  }
++  data->folder = nullptr;
++  pbl_i18n_free_all(data);
++}
++#endif
++
+ static void prv_data_changed(void *context) {
+   LauncherAppWindowData *data = context;
+   launcher_menu_layer_reload_data(&data->launcher_menu_layer);
+@@ -102,6 +341,9 @@ static void prv_window_load(Window *window) {
+ 
+   LauncherMenuLayer *launcher_menu_layer = &data->launcher_menu_layer;
+   launcher_menu_layer_init(launcher_menu_layer, data_source);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  prv_folder_init(data);
++#endif
+   launcher_menu_layer_set_click_config_onto_window(launcher_menu_layer, window);
+   layer_add_child(window_root_layer, launcher_menu_layer_get_layer(launcher_menu_layer));
+ 
+@@ -122,6 +364,15 @@ static void prv_window_load(Window *window) {
+     .context = data,
+   };
+   event_service_client_subscribe(&data->pref_change_event_info);
++
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  // Back from an app launched from the folder: open the folder again
++  if (s_launcher_app_persisted_data.valid && s_launcher_folder_persisted_data.open &&
++      (app_menu_data_source_get_count(&data->folder_data_source) > 0)) {
++    prv_folder_push(data, false /* animated */);
++  }
++  s_launcher_folder_persisted_data.open = false;
++#endif
+ }
+ 
+ static void prv_window_unload(Window *window) {
+@@ -131,6 +382,13 @@ static void prv_window_unload(Window *window) {
+   GRangeVertical launcher_selection_vertical_range;
+   launcher_menu_layer_get_selection_vertical_range(&data->launcher_menu_layer,
+                                                    &launcher_selection_vertical_range);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  // An app launched from the folder animates from the folder's selection
++  if (s_launcher_folder_persisted_data.open) {
++    launcher_selection_vertical_range =
++        s_launcher_app_persisted_data.draw_state.selection_vertical_range;
++  }
++#endif
+ 
+   // Save the current state of the launcher so we can know its draw state and restore it later
+   s_launcher_app_persisted_data = (LauncherAppPersistedData){
+@@ -146,6 +404,9 @@ static void prv_window_unload(Window *window) {
+   app_focus_service_unsubscribe();
+   launcher_menu_layer_deinit(&data->launcher_menu_layer);
+   app_menu_data_source_deinit(&data->app_menu_data_source);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  prv_folder_deinit(data);
++#endif
+ }
+ 
+ ////////////////////
+diff --git a/pebble/apps/system/launcher/default/menu_layer.c b/pebble/apps/system/launcher/default/menu_layer.c
+index 02efe43e..1420d475 100644
+--- a/pebble/apps/system/launcher/default/menu_layer.c
++++ b/pebble/apps/system/launcher/default/menu_layer.c
+@@ -59,6 +59,56 @@ static void prv_glance_changed(void *context) {
+   prv_launcher_menu_layer_mark_dirty(launcher_menu_layer);
+ }
+ 
++////////////////////////
++// Rows
++
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++//! Row of the folder, or -1 without one
++static int prv_folder_row(LauncherMenuLayer *launcher_menu_layer) {
++  if (!launcher_menu_layer->folder_node) {
++    return -1;
++  }
++  AppMenuDataSource *data_source = launcher_menu_layer->data_source;
++  const uint16_t count = app_menu_data_source_get_count(data_source);
++  for (uint16_t i = 0; i < count; i++) {
++    const AppMenuNode *node = app_menu_data_source_get_node_at_index(data_source, i);
++    if (node && (node->install_id == launcher_menu_layer->folder_after_install_id)) {
++      return i + 1;
++    }
++  }
++  return 0;
++}
++#endif
++
++static uint16_t prv_row_count(LauncherMenuLayer *launcher_menu_layer) {
++  AppMenuDataSource *data_source = launcher_menu_layer->data_source;
++  if (!data_source) {
++    return 0;
++  }
++  uint16_t count = app_menu_data_source_get_count(data_source);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  if (launcher_menu_layer->folder_node) {
++    count++;
++  }
++#endif
++  return count;
++}
++
++static AppMenuNode *prv_node_at_row(LauncherMenuLayer *launcher_menu_layer, uint16_t row) {
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  const int folder_row = prv_folder_row(launcher_menu_layer);
++  if (folder_row >= 0) {
++    if (row == folder_row) {
++      return launcher_menu_layer->folder_node;
++    }
++    if (row > folder_row) {
++      row--;
++    }
++  }
++#endif
++  return app_menu_data_source_get_node_at_index(launcher_menu_layer->data_source, row);
++}
++
+ ////////////////////////
+ // MenuLayer callbacks
+ 
+@@ -74,6 +124,19 @@ static void prv_menu_layer_select([[maybe_unused]] MenuLayer *menu_layer, MenuIn
+   if (!window) {
+     return;
+   }
++
++  AppMenuNode *node = prv_node_at_row(launcher_menu_layer, cell_index->row);
++  PBL_ASSERTN(node);
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  if (node == launcher_menu_layer->folder_node) {
++    if (launcher_menu_layer->folder_selected) {
++      launcher_menu_layer->folder_selected(launcher_menu_layer->folder_context);
++    }
++    return;
++  }
++  launcher_menu_layer->launched_app = true;
++#endif
++
+   // Disable all clicking on the window so the user can't scroll anymore
+   window_set_click_config_provider(window, nullptr);
+ 
+@@ -82,8 +145,6 @@ static void prv_menu_layer_select([[maybe_unused]] MenuLayer *menu_layer, MenuIn
+   // rendering the last frame of the menu layer; we need to do this because some clients (like the
+   // normal firmware app launcher) rely on the display reflecting the final state of the launcher
+   // when we launch an app (e.g. for compositor transition animations)
+-  AppMenuNode *node = app_menu_data_source_get_node_at_index(data_source, cell_index->row);
+-  PBL_ASSERTN(node);
+   launcher_menu_layer->app_to_launch_after_next_render = node->install_id;
+ 
+   // Now kick off a render of the last frame of the menu layer; note that any menu layer scroll or
+@@ -96,8 +157,7 @@ static uint16_t prv_menu_layer_get_num_rows([[maybe_unused]] MenuLayer *menu_lay
+                                             [[maybe_unused]] uint16_t section_index,
+                                             void *context) {
+   LauncherMenuLayer *launcher_menu_layer = context;
+-  AppMenuDataSource *data_source = launcher_menu_layer->data_source;
+-  return data_source ? app_menu_data_source_get_count(data_source) : (uint16_t)0;
++  return prv_row_count(launcher_menu_layer);
+ }
+ 
+ static void prv_menu_layer_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index,
+@@ -108,7 +168,7 @@ static void prv_menu_layer_draw_row(GContext *ctx, const Layer *cell_layer, Menu
+     return;
+   }
+ 
+-  AppMenuNode *node = app_menu_data_source_get_node_at_index(data_source, cell_index->row);
++  AppMenuNode *node = prv_node_at_row(launcher_menu_layer, cell_index->row);
+ 
+   const GRect *cell_layer_bounds = &cell_layer->bounds;
+   const bool is_highlighted = menu_cell_layer_is_highlighted(cell_layer);
+@@ -160,8 +220,7 @@ static void prv_play_glance_for_row(LauncherMenuLayer *launcher_menu_layer, uint
+   }
+ 
+   // Get the app menu node for the glance that is about to be selected
+-  AppMenuDataSource *data_source = launcher_menu_layer->data_source;
+-  AppMenuNode *node = app_menu_data_source_get_node_at_index(data_source, row);
++  AppMenuNode *node = prv_node_at_row(launcher_menu_layer, row);
+ 
+   // Instruct the launcher app glance service to play the glance for the node
+   launcher_app_glance_service_play_glance_for_app_node(&launcher_menu_layer->glance_service, node);
+@@ -431,3 +490,17 @@ void launcher_menu_layer_deinit(LauncherMenuLayer *launcher_menu_layer) {
+ #endif
+   layer_deinit(&launcher_menu_layer->container_layer);
+ }
++
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++void launcher_menu_layer_set_folder_row(LauncherMenuLayer *launcher_menu_layer, AppMenuNode *node,
++                                        AppInstallId after_install_id,
++                                        void (*selected)(void *context), void *context) {
++  if (!launcher_menu_layer) {
++    return;
++  }
++  launcher_menu_layer->folder_node = node;
++  launcher_menu_layer->folder_after_install_id = after_install_id;
++  launcher_menu_layer->folder_selected = selected;
++  launcher_menu_layer->folder_context = context;
++}
++#endif
+diff --git a/pebble/apps/system/launcher/default/menu_layer.h b/pebble/apps/system/launcher/default/menu_layer.h
+index 133dd311..aa5085e2 100644
+--- a/pebble/apps/system/launcher/default/menu_layer.h
++++ b/pebble/apps/system/launcher/default/menu_layer.h
+@@ -23,6 +23,16 @@ typedef struct LauncherMenuLayer {
+   LauncherAppGlanceService glance_service;
+   bool selection_animations_enabled;
+   AppInstallId app_to_launch_after_next_render;
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++  //! Row that opens a folder instead of launching an app; nullptr for none
++  AppMenuNode *folder_node;
++  //! The folder row follows the app with this install ID, or comes first without it
++  AppInstallId folder_after_install_id;
++  void (*folder_selected)(void *context);
++  void *folder_context;
++  //! Set once the user picked an app to launch
++  bool launched_app;
++#endif
+ } LauncherMenuLayer;
+ 
+ typedef struct LauncherMenuLayerSelectionState {
+@@ -62,3 +72,10 @@ void launcher_menu_layer_set_selection_animations_enabled(LauncherMenuLayer *lau
+                                                           bool enabled);
+ 
+ void launcher_menu_layer_deinit(LauncherMenuLayer *launcher_menu_layer);
++
++#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
++//! Shows @p node as a folder row after the app with @p after_install_id; nullptr hides it
++void launcher_menu_layer_set_folder_row(LauncherMenuLayer *launcher_menu_layer, AppMenuNode *node,
++                                        AppInstallId after_install_id,
++                                        void (*selected)(void *context), void *context);
++#endif
+-- 
+2.43.0
+

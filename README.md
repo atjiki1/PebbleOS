@@ -1,6 +1,7 @@
 > [!NOTE]
 > **Personal multi-link build.** This fork automatically builds each official PebbleOS release
-> with two additions: a simultaneous iPhone + iPad connection and notifications grouped by sender.
+> with a few additions: a simultaneous iPhone + iPad connection, notifications grouped by sender
+> and an "Apps" folder for installed apps.
 >
 > - How to use it: [English](.multilink/README.en.md) · [Korean](.multilink/README.md)
 > - Firmware: [Releases](https://github.com/atjiki1/PebbleOS/releases)

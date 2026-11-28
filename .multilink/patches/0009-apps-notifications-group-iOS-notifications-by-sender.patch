@@ -1,7 +1,7 @@
 From ffa590b97dc963cef4ec78b6eb27971ab1ee390f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 27 Nov 2026 10:04:30 +0900
-Subject: [PATCH 09/10] apps/notifications: group iOS notifications by sender
+Subject: [PATCH 09/11] apps/notifications: group iOS notifications by sender
 
 With the multi-link experiment, Group by Sender also covers ANCS
 notifications from the iPhone and the secondary iPad. The group key is

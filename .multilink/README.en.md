@@ -5,7 +5,8 @@
 This is a personal firmware built from the official
 [coredevices/PebbleOS](https://github.com/coredevices/PebbleOS) releases with a set of patches on top.
 It lets a Pebble Time 2 (obelix) or Pebble Round 2 (getafix) stay connected to **an iPhone and an
-iPad at the same time**, and it groups notifications by sender.
+iPad at the same time**, groups notifications by sender, and gathers installed apps in an
+"Apps" folder.
 
 - Firmware: `v<version>-multilink` under [Releases](https://github.com/atjiki1/PebbleOS/releases)
 - Korean language pack: `v<version>-ko` under [atjiki1/PebbleOS-Korean](https://github.com/atjiki1/PebbleOS-Korean/releases)
@@ -56,7 +57,19 @@ Two settings under Settings → Notifications. Both take Never / 1 Day / 1 Week 
 Notifications are stored the same way as in the official firmware: one by one, and the oldest are
 removed first when storage is full.
 
-## 3. Version shown on the watch
+## 3. The "Apps" folder in the launcher
+
+- The watch's app list gets an **"Apps" row right after Settings**.
+  - If you move Settings in the Pebble app, "Apps" follows it.
+- "Apps" opens the **apps installed through the Pebble app, sorted by name**.
+  - Sorting ignores case; Korean names come after English ones.
+- The main list keeps only the built-in apps (Settings, Notifications, Music, Alarms, Weather, ...).
+  - Their order can still be changed in the Pebble app.
+- The "Apps" row is hidden while no app is installed.
+- Closing an app launched from the folder returns to the folder.
+- The "Apps" row exists on the watch only. The list in the iPhone Pebble app does not change.
+
+## 4. Version shown on the watch
 
 - Settings → System → Information shows the official version (e.g. `v4.47.3`). This keeps the
   Pebble app from offering an update.
@@ -66,7 +79,7 @@ removed first when storage is full.
   features. When a new official version comes out, this repository builds the multi-link version
   automatically.
 
-## 4. Automatic builds
+## 5. Automatic builds
 
 `.github/workflows/multilink-release.yml`
 - Checks the official repository every day for a new release tag (`vX.Y.Z`).
@@ -78,7 +91,7 @@ removed first when storage is full.
 - If the official code changes too much for the patches to apply, the build fails and the patches
   have to be updated for the new version.
 
-## 5. Patches
+## 6. Patches
 
 | Patch | Change |
 |---|---|
@@ -92,16 +105,17 @@ removed first when storage is full.
 | 0008 | Keep one copy of a notification posted by both devices; name the second device |
 | 0009 | Group iOS notifications by sender; how groups and single rows open |
 | 0010 | Show a sender's earlier messages in the popup (Popup by Sender) |
+| 0011 | Gather installed apps in an "Apps" folder after Settings, sorted by name |
 
 The code lives in two branches:
 - `multi-link-experiment`: development history of 0001-0008
-- `ml-grouping`: 0001-0010 on top of the latest official tag
+- `ml-grouping`: 0001-0011 on top of the latest official tag
 
 To regenerate the patches:
 
     git format-patch <tag>..ml-grouping -o .multilink/patches
 
-## 6. Known limitations
+## 7. Known limitations
 
 - The second device must be an iOS device (ANCS).
 - The second device only provides notifications and notification actions such as Dismiss. Apps,

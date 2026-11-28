@@ -1,7 +1,7 @@
 From 17923e08341effa76956910e33d48f59b27983c0 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 27 Nov 2026 11:53:50 +0900
-Subject: [PATCH 10/10] notifications: show a sender's earlier messages in the
+Subject: [PATCH 10/11] notifications: show a sender's earlier messages in the
  popup
 
 With the multi-link experiment, a new setting Popup by Sender (Never,
