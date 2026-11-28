@@ -5,7 +5,7 @@ name: Build Multi-link Experiment
 
 on:
   push:
-    branches: [multi-link-experiment]
+    branches: [multi-link-experiment, ml-grouping-ci]
   workflow_dispatch:
 
 jobs:
