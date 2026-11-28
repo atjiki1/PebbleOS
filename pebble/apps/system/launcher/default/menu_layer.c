@@ -60,6 +60,56 @@ static void prv_glance_changed(void *context) {
 }
 
 ////////////////////////
+// Rows
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Row of the folder, or -1 without one
+static int prv_folder_row(LauncherMenuLayer *launcher_menu_layer) {
+  if (!launcher_menu_layer->folder_node) {
+    return -1;
+  }
+  AppMenuDataSource *data_source = launcher_menu_layer->data_source;
+  const uint16_t count = app_menu_data_source_get_count(data_source);
+  for (uint16_t i = 0; i < count; i++) {
+    const AppMenuNode *node = app_menu_data_source_get_node_at_index(data_source, i);
+    if (node && (node->install_id == launcher_menu_layer->folder_after_install_id)) {
+      return i + 1;
+    }
+  }
+  return 0;
+}
+#endif
+
+static uint16_t prv_row_count(LauncherMenuLayer *launcher_menu_layer) {
+  AppMenuDataSource *data_source = launcher_menu_layer->data_source;
+  if (!data_source) {
+    return 0;
+  }
+  uint16_t count = app_menu_data_source_get_count(data_source);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (launcher_menu_layer->folder_node) {
+    count++;
+  }
+#endif
+  return count;
+}
+
+static AppMenuNode *prv_node_at_row(LauncherMenuLayer *launcher_menu_layer, uint16_t row) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  const int folder_row = prv_folder_row(launcher_menu_layer);
+  if (folder_row >= 0) {
+    if (row == folder_row) {
+      return launcher_menu_layer->folder_node;
+    }
+    if (row > folder_row) {
+      row--;
+    }
+  }
+#endif
+  return app_menu_data_source_get_node_at_index(launcher_menu_layer->data_source, row);
+}
+
+////////////////////////
 // MenuLayer callbacks
 
 static void prv_menu_layer_select([[maybe_unused]] MenuLayer *menu_layer, MenuIndex *cell_index,
@@ -74,6 +124,19 @@ static void prv_menu_layer_select([[maybe_unused]] MenuLayer *menu_layer, MenuIn
   if (!window) {
     return;
   }
+
+  AppMenuNode *node = prv_node_at_row(launcher_menu_layer, cell_index->row);
+  PBL_ASSERTN(node);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (node == launcher_menu_layer->folder_node) {
+    if (launcher_menu_layer->folder_selected) {
+      launcher_menu_layer->folder_selected(launcher_menu_layer->folder_context);
+    }
+    return;
+  }
+  launcher_menu_layer->launched_app = true;
+#endif
+
   // Disable all clicking on the window so the user can't scroll anymore
   window_set_click_config_provider(window, nullptr);
 
@@ -82,8 +145,6 @@ static void prv_menu_layer_select([[maybe_unused]] MenuLayer *menu_layer, MenuIn
   // rendering the last frame of the menu layer; we need to do this because some clients (like the
   // normal firmware app launcher) rely on the display reflecting the final state of the launcher
   // when we launch an app (e.g. for compositor transition animations)
-  AppMenuNode *node = app_menu_data_source_get_node_at_index(data_source, cell_index->row);
-  PBL_ASSERTN(node);
   launcher_menu_layer->app_to_launch_after_next_render = node->install_id;
 
   // Now kick off a render of the last frame of the menu layer; note that any menu layer scroll or
@@ -96,8 +157,7 @@ static uint16_t prv_menu_layer_get_num_rows([[maybe_unused]] MenuLayer *menu_lay
                                             [[maybe_unused]] uint16_t section_index,
                                             void *context) {
   LauncherMenuLayer *launcher_menu_layer = context;
-  AppMenuDataSource *data_source = launcher_menu_layer->data_source;
-  return data_source ? app_menu_data_source_get_count(data_source) : (uint16_t)0;
+  return prv_row_count(launcher_menu_layer);
 }
 
 static void prv_menu_layer_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index,
@@ -108,7 +168,7 @@ static void prv_menu_layer_draw_row(GContext *ctx, const Layer *cell_layer, Menu
     return;
   }
 
-  AppMenuNode *node = app_menu_data_source_get_node_at_index(data_source, cell_index->row);
+  AppMenuNode *node = prv_node_at_row(launcher_menu_layer, cell_index->row);
 
   const GRect *cell_layer_bounds = &cell_layer->bounds;
   const bool is_highlighted = menu_cell_layer_is_highlighted(cell_layer);
@@ -160,8 +220,7 @@ static void prv_play_glance_for_row(LauncherMenuLayer *launcher_menu_layer, uint
   }
 
   // Get the app menu node for the glance that is about to be selected
-  AppMenuDataSource *data_source = launcher_menu_layer->data_source;
-  AppMenuNode *node = app_menu_data_source_get_node_at_index(data_source, row);
+  AppMenuNode *node = prv_node_at_row(launcher_menu_layer, row);
 
   // Instruct the launcher app glance service to play the glance for the node
   launcher_app_glance_service_play_glance_for_app_node(&launcher_menu_layer->glance_service, node);
@@ -431,3 +490,17 @@ void launcher_menu_layer_deinit(LauncherMenuLayer *launcher_menu_layer) {
 #endif
   layer_deinit(&launcher_menu_layer->container_layer);
 }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+void launcher_menu_layer_set_folder_row(LauncherMenuLayer *launcher_menu_layer, AppMenuNode *node,
+                                        AppInstallId after_install_id,
+                                        void (*selected)(void *context), void *context) {
+  if (!launcher_menu_layer) {
+    return;
+  }
+  launcher_menu_layer->folder_node = node;
+  launcher_menu_layer->folder_after_install_id = after_install_id;
+  launcher_menu_layer->folder_selected = selected;
+  launcher_menu_layer->folder_context = context;
+}
+#endif

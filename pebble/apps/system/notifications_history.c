@@ -7,6 +7,7 @@
 
 #include <pbl/services/timeline/attribute.h>
 #include <pbl/services/timeline/timeline.h>
+#include <pbl/util/math.h>
 #include <pbl/util/string.h>
 
 #include <applib/app_malloc.h>
@@ -39,10 +40,16 @@ static const char *prv_group_sender_for_item(const TimelineItem *item, char *buf
                                              size_t buffer_size) {
   static const Uuid s_android_notifications_source = UUID_NOTIFICATIONS_DATA_SOURCE;
 
-  if (timeline_item_is_ancs_notif(item) ||
-      !uuid_equal(&item->header.parent_id, &s_android_notifications_source)) {
+  const bool is_ancs = timeline_item_is_ancs_notif(item);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (!is_ancs && !uuid_equal(&item->header.parent_id, &s_android_notifications_source)) {
     return nullptr;
   }
+#else
+  if (is_ancs || !uuid_equal(&item->header.parent_id, &s_android_notifications_source)) {
+    return nullptr;
+  }
+#endif
 
   const char *sender = attribute_get_string(&item->attr_list, AttributeIdSender, "");
   const bool from_title = IS_EMPTY_STRING(sender);
@@ -50,8 +57,10 @@ static const char *prv_group_sender_for_item(const TimelineItem *item, char *buf
     sender = attribute_get_string(&item->attr_list, AttributeIdTitle, "");
   }
 
-  strncpy(buffer, sender, buffer_size - 1);
-  buffer[buffer_size - 1] = '\0';
+  // Storage iteration reads at most ATTRIBUTE_TITLE_MAX_LEN bytes; cut full items the same way
+  const size_t max_len = MIN(buffer_size - 1, (size_t)ATTRIBUTE_TITLE_MAX_LEN);
+  strncpy(buffer, sender, max_len);
+  buffer[max_len] = '\0';
   string_strip_trailing_whitespace(buffer, buffer);
   char *start = (char *)string_strip_leading_whitespace(buffer);
 
@@ -64,7 +73,37 @@ static const char *prv_group_sender_for_item(const TimelineItem *item, char *buf
     }
   }
 
-  return IS_EMPTY_STRING(start) ? nullptr : start;
+  if (IS_EMPTY_STRING(start)) {
+    return nullptr;
+  }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  // iOS: keep the same name in different apps apart, "<app id>\x1f<sender>"
+  const char *app_id = attribute_get_string(&item->attr_list, AttributeIdiOSAppIdentifier, "");
+  if (is_ancs && !IS_EMPTY_STRING(app_id)) {
+    const size_t app_id_len = MIN(strlen(app_id), (size_t)ATTRIBUTE_TITLE_MAX_LEN);
+    const size_t sender_len = strlen(start);
+    if (app_id_len + 1 + sender_len + 1 > buffer_size) {
+      return start;
+    }
+    memmove(&buffer[app_id_len + 1], start, sender_len + 1);
+    memcpy(buffer, app_id, app_id_len);
+    buffer[app_id_len] = NOTIFICATIONS_HISTORY_GROUP_KEY_SEPARATOR;
+    return buffer;
+  }
+#endif
+
+  return start;
+}
+
+const char *notifications_history_group_key(const TimelineItem *item, char *buffer,
+                                            size_t buffer_size) {
+  return prv_group_sender_for_item(item, buffer, buffer_size);
+}
+
+const char *notifications_history_group_label(const char *sender) {
+  const char *separator = strchr(sender, NOTIFICATIONS_HISTORY_GROUP_KEY_SEPARATOR);
+  return separator ? separator + 1 : sender;
 }
 
 static NotificationHistoryRow *prv_find_group(NotificationHistory *history, const char *sender) {
@@ -176,7 +215,7 @@ void notifications_history_add_item(NotificationHistory *history, const Timeline
   if (notifications_history_is_hidden(&item->header)) {
     return;
   }
-  char buffer[ATTRIBUTE_TITLE_MAX_LEN + 1];
+  char buffer[NOTIFICATIONS_HISTORY_GROUP_KEY_MAX_LEN + 1];
   const char *sender = nullptr;
   if (history->group_by_sender && (item->header.timestamp >= history->grouping_cutoff)) {
     sender = prv_group_sender_for_item(item, buffer, sizeof(buffer));

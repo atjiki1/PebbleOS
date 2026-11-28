@@ -118,6 +118,10 @@ static bool s_notification_dismissal_sync = false;
 #define PREF_KEY_NOTIF_GROUPING_RANGE "notifGroupingRange"
 static NotificationGroupingRange s_notification_grouping_range = NotificationGroupingRange_Never;
 
+#define PREF_KEY_NOTIF_POPUP_GROUPING_RANGE "notifPopupGroupingRange"
+static NotificationGroupingRange s_notification_popup_grouping_range =
+    NotificationGroupingRange_Never;
+
 #define PREF_KEY_NOTIF_STATUS_BAR_STYLE "notifStatusBarStyle"
 static NotificationStatusBarStyle s_notification_status_bar_style =
     NotificationStatusBarStyle_Default;
@@ -484,6 +488,7 @@ void alerts_preferences_init(void) {
   RESTORE_PREF(PREF_KEY_NOTIF_RESPECT_PHONE_SILENCE, s_notification_respect_phone_silence);
   RESTORE_PREF(PREF_KEY_NOTIF_DISMISSAL_SYNC, s_notification_dismissal_sync);
   RESTORE_PREF(PREF_KEY_NOTIF_GROUPING_RANGE, s_notification_grouping_range);
+  RESTORE_PREF(PREF_KEY_NOTIF_POPUP_GROUPING_RANGE, s_notification_popup_grouping_range);
   RESTORE_PREF(PREF_KEY_NOTIF_STATUS_BAR_STYLE, s_notification_status_bar_style);
   RESTORE_PREF(PREF_KEY_NOTIF_TEXT_SIZE, s_notification_content_size);
   RESTORE_PREF(PREF_KEY_DND_AUTO_DISMISS, s_dnd_auto_dismiss);
@@ -608,6 +613,17 @@ NotificationGroupingRange alerts_preferences_get_notification_grouping_range(voi
 void alerts_preferences_set_notification_grouping_range(NotificationGroupingRange range) {
   s_notification_grouping_range = range;
   SET_PREF(PREF_KEY_NOTIF_GROUPING_RANGE, s_notification_grouping_range);
+}
+
+NotificationGroupingRange alerts_preferences_get_notification_popup_grouping_range(void) {
+  return (s_notification_popup_grouping_range < NotificationGroupingRangeCount)
+             ? s_notification_popup_grouping_range
+             : NotificationGroupingRange_Never;
+}
+
+void alerts_preferences_set_notification_popup_grouping_range(NotificationGroupingRange range) {
+  s_notification_popup_grouping_range = range;
+  SET_PREF(PREF_KEY_NOTIF_POPUP_GROUPING_RANGE, s_notification_popup_grouping_range);
 }
 
 NotificationStatusBarStyle alerts_preferences_get_notification_status_bar_style(void) {
@@ -1003,6 +1019,7 @@ void alerts_preferences_handle_blob_db_event(PebbleBlobDBEvent *event) {
   RELOAD_IF_MATCH(PREF_KEY_NOTIF_RESPECT_PHONE_SILENCE, s_notification_respect_phone_silence);
   RELOAD_IF_MATCH(PREF_KEY_NOTIF_DISMISSAL_SYNC, s_notification_dismissal_sync);
   RELOAD_IF_MATCH(PREF_KEY_NOTIF_GROUPING_RANGE, s_notification_grouping_range);
+  RELOAD_IF_MATCH(PREF_KEY_NOTIF_POPUP_GROUPING_RANGE, s_notification_popup_grouping_range);
   RELOAD_IF_MATCH(PREF_KEY_NOTIF_STATUS_BAR_STYLE, s_notification_status_bar_style);
   RELOAD_IF_MATCH(PREF_KEY_NOTIF_TEXT_SIZE, s_notification_content_size);
   RELOAD_IF_MATCH(PREF_KEY_DND_MOTION_BACKLIGHT, s_dnd_motion_backlight);

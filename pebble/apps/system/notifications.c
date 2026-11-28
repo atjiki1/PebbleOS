@@ -118,9 +118,15 @@ static void prv_load_notification_storage(NotificationsData *data) {
 
   char sender[ATTRIBUTE_TITLE_MAX_LEN + 1];
   char title[ATTRIBUTE_TITLE_MAX_LEN + 1];
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  char app_id[ATTRIBUTE_TITLE_MAX_LEN + 1];
+#endif
   Attribute attributes[] = {
     {.id = AttributeIdSender, .cstring = sender},
     {.id = AttributeIdTitle, .cstring = title},
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+    {.id = AttributeIdiOSAppIdentifier, .cstring = app_id},
+#endif
   };
   AttributeList attr_list = {
     .num_attributes = ARRAY_LENGTH(attributes),
@@ -240,7 +246,11 @@ static void prv_add_row_notifications(const NotificationHistoryRow *row) {
 
 static bool prv_push_group_notification_window(const NotificationGroupWindow *group_window,
                                                uint16_t index) {
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  notification_window_init_history_subset();
+#else
   notification_window_init_history(false);
+#endif
   if (notification_window_is_modal()) {
     return false;
   }
@@ -310,7 +320,8 @@ static void prv_group_window_load(Window *window) {
   NotificationGroupWindow *group_window = window_get_user_data(window);
   GRect sender_frame = window->layer.bounds;
   sender_frame.size.h = MENU_CELL_BASIC_HEADER_HEIGHT;
-  text_layer_init_with_parameters(&group_window->sender_layer, &sender_frame, group_window->sender,
+  text_layer_init_with_parameters(&group_window->sender_layer, &sender_frame,
+                                  notifications_history_group_label(group_window->sender),
                                   fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD), GColorBlack,
                                   GColorWhite,
                                   PBL_IF_RECT_ELSE(GTextAlignmentLeft, GTextAlignmentCenter),
@@ -393,6 +404,18 @@ static bool prv_push_notification_window(NotificationsData *data) {
   notification_window_show();
   return true;
 }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static void prv_push_single_notification_window(const Uuid *id) {
+  notification_window_init_history_subset();
+  if (notification_window_is_modal()) {
+    return;
+  }
+  notification_window_add_notification_by_id((Uuid *)id);
+  notification_window_show();
+  notification_window_focus_notification((Uuid *)id, false /* animated */);
+}
+#endif
 
 ///////////////////
 // Confirm Dialog
@@ -656,6 +679,14 @@ static void prv_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, vo
     return;
   }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  // Grouped by sender: a single row opens just that notification
+  if (notifications_data->history.group_by_sender) {
+    prv_push_single_notification_window(notifications_history_row_get_latest_id(row));
+    return;
+  }
+#endif
+
   bool success = prv_push_notification_window(notifications_data);
   if (!success) {
     // Bail if a notification came in ahead of us and created a modal window
@@ -708,7 +739,7 @@ static int16_t prv_get_cell_height(struct MenuLayer *menu_layer, MenuIndex *cell
 }
 
 static const char *prv_get_group_title(NotificationsData *data, const NotificationHistoryRow *row) {
-  const char *sender = row->group.sender;
+  const char *sender = notifications_history_group_label(row->group.sender);
   /// Notification sender followed by the number of grouped notifications
   const char *format = pbl_i18n_get("%s (%u)", data);
   const int title_length = snprintf(nullptr, 0, format, sender, (unsigned int)row->group.count);

@@ -23,6 +23,16 @@ typedef struct LauncherMenuLayer {
   LauncherAppGlanceService glance_service;
   bool selection_animations_enabled;
   AppInstallId app_to_launch_after_next_render;
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  //! Row that opens a folder instead of launching an app; nullptr for none
+  AppMenuNode *folder_node;
+  //! The folder row follows the app with this install ID, or comes first without it
+  AppInstallId folder_after_install_id;
+  void (*folder_selected)(void *context);
+  void *folder_context;
+  //! Set once the user picked an app to launch
+  bool launched_app;
+#endif
 } LauncherMenuLayer;
 
 typedef struct LauncherMenuLayerSelectionState {
@@ -62,3 +72,10 @@ void launcher_menu_layer_set_selection_animations_enabled(LauncherMenuLayer *lau
                                                           bool enabled);
 
 void launcher_menu_layer_deinit(LauncherMenuLayer *launcher_menu_layer);
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! Shows @p node as a folder row after the app with @p after_install_id; nullptr hides it
+void launcher_menu_layer_set_folder_row(LauncherMenuLayer *launcher_menu_layer, AppMenuNode *node,
+                                        AppInstallId after_install_id,
+                                        void (*selected)(void *context), void *context);
+#endif

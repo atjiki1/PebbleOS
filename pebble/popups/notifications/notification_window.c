@@ -5,6 +5,9 @@
 
 #include "notification_window_private.h"
 #include "notifications_presented_list.h"
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+#include "notification_sender_popup.h"
+#endif
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -93,6 +96,9 @@ static void prv_handle_notification_removed_common(Uuid *, NotificationType);
 static bool prv_should_pop_due_to_inactivity(void);
 
 static void prv_do_notification_vibe(NotificationWindowData *data, Uuid *id);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+static void prv_dismiss_older_from_same_sender(const Uuid *id);
+#endif
 
 /////////////////////
 // Helpers
@@ -529,6 +535,11 @@ PBL_T_STATIC LayoutLayer *prv_get_layout_handler(SwapLayer *swap_layer, int8_t r
       PBL_LOG_ERR("Failed to read notification");
       goto cleanup;
     }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+    if (data->is_modal) {
+      item = notification_sender_popup_merge(item);
+    }
+#endif
   } else if (type == NotificationReminder) {
     // validate reminder
     int rv = reminder_db_read_item(item, id);
@@ -1425,7 +1436,17 @@ void notification_window_init(bool is_modal) {
 
 void notification_window_init_history(bool allow_dismiss_all) {
   prv_init_notification_window(false, allow_dismiss_all);
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  s_notification_window_data.history_subset = false;
+#endif
 }
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+void notification_window_init_history_subset(void) {
+  prv_init_notification_window(false, false /* allow_dismiss_all */);
+  s_notification_window_data.history_subset = true;
+}
+#endif
 
 void notification_window_show() {
   if (s_notification_window_data.is_modal) {
@@ -1503,6 +1524,13 @@ static void prv_handle_action_result(PebbleSysNotificationActionResult *action_r
 
   // the notification has been acted on. Remove it.
   NotificationWindowData *data = &s_notification_window_data;
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if ((action_result->type == ActionResultTypeSuccessANCSDismiss) && data->is_modal &&
+      !data->window_frozen && notification_sender_popup_enabled() &&
+      uuid_equal(&action_result->id, notifications_presented_list_current())) {
+    prv_dismiss_older_from_same_sender(&action_result->id);
+  }
+#endif
   notification_storage_set_status(&action_result->id, TimelineItemStatusActioned);
   data->notifications_modified = true;
 
@@ -1591,6 +1619,65 @@ static bool prv_notification_is_phone_silent(Uuid *id) {
   return is_phone_silent;
 }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+//! The new card shows the sender's earlier messages, so drop their own cards
+static int prv_remove_presented_from_same_sender(Uuid *id) {
+  if (!notification_sender_popup_enabled()) {
+    return 0;
+  }
+  const int count = notifications_presented_list_count();
+  if (count == 0) {
+    return 0;
+  }
+  Uuid *same = applib_malloc(sizeof(Uuid) * count);
+  if (!same) {
+    return 0;
+  }
+  int num_same = 0;
+  Uuid *first = notifications_presented_list_first();
+  for (int i = 0; i < count; i++) {
+    Uuid *presented = notifications_presented_list_relative(first, i);
+    if (!uuid_is_invalid(presented) &&
+        (notifications_presented_list_get_type(presented) == NotificationMobile) &&
+        !uuid_equal(presented, id) && notification_sender_popup_same_sender(presented, id)) {
+      same[num_same++] = *presented;
+    }
+  }
+  for (int i = 0; i < num_same; i++) {
+    notifications_presented_list_remove(&same[i]);
+  }
+  applib_free(same);
+  return num_same;
+}
+
+//! Dismissing a sender card also dismisses the earlier messages it shows
+static void prv_dismiss_older_from_same_sender(const Uuid *id) {
+  TimelineItem item;
+  if (!notification_storage_get(id, &item)) {
+    return;
+  }
+  Uuid older[NOTIFICATION_SENDER_POPUP_MAX_MESSAGES - 1];
+  const int num_older = notification_sender_popup_older_ids(&item, older, ARRAY_LENGTH(older));
+  timeline_item_free_allocated_buffer(&item);
+
+  for (int i = 0; i < num_older; i++) {
+    TimelineItem older_item;
+    if (!notification_storage_get(&older[i], &older_item)) {
+      continue;
+    }
+    const TimelineItemAction *dismiss = timeline_item_find_dismiss_action(&older_item);
+    if (dismiss) {
+      timeline_enable_ancs_bulk_action_mode(true);
+      timeline_enable_async_remote_action_mode(true);
+      timeline_invoke_action(&older_item, dismiss, nullptr);
+      timeline_enable_async_remote_action_mode(false);
+      timeline_enable_ancs_bulk_action_mode(false);
+    }
+    timeline_item_free_allocated_buffer(&older_item);
+  }
+}
+#endif
+
 static void prv_handle_notification_added_common(Uuid *id, NotificationType type) {
   NotificationWindowData *data = &s_notification_window_data;
   prv_log_notification_vibe("received", id);
@@ -1625,7 +1712,18 @@ static void prv_handle_notification_added_common(Uuid *id, NotificationType type
   bool is_new = !window_stack_contains_window(window_stack, &data->window);
   bool in_view = window_is_on_screen(&data->window);
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  const bool removed_same_sender =
+      (type == NotificationMobile) && (prv_remove_presented_from_same_sender(id) > 0);
+#endif
+
   prv_notification_window_add_notification(id, type);
+
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (removed_same_sender && !is_new && !in_view) {
+    prv_reload_swap_layer(data);
+  }
+#endif
 
   if (is_new) {
     data->first_notif_loaded = false;
@@ -1762,6 +1860,11 @@ void app_notification_window_add_new_notification_by_id(Uuid *id) {
   if (!s_in_use || data->is_modal) {
     return;
   }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  if (data->history_subset) {
+    return;
+  }
+#endif
 
   bool should_focus = (app_window_stack_get_top_window() == &data->window);
   notification_window_add_notification_by_id(id);

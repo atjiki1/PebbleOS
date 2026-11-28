@@ -177,6 +177,21 @@ NotificationGroupingRange alerts_preferences_get_notification_grouping_range(voi
  */
 void alerts_preferences_set_notification_grouping_range(NotificationGroupingRange range);
 
+/**
+ * @brief Get the range within which a notification popup also shows the sender's earlier
+ * notifications.
+ *
+ * @return Range; NotificationGroupingRange_Never if the stored value is invalid.
+ */
+NotificationGroupingRange alerts_preferences_get_notification_popup_grouping_range(void);
+
+/**
+ * @brief Set the notification popup sender range.
+ *
+ * @param range Range.
+ */
+void alerts_preferences_set_notification_popup_grouping_range(NotificationGroupingRange range);
+
 /** @brief Style of the clock in the notification window status bar. */
 typedef enum {
   /** Regular clock (default). */

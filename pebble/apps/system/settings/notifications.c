@@ -39,6 +39,9 @@ enum NotificationsItem {
   NotificationsItemVibeDelay,
   NotificationsItemBacklight,
   NotificationsItemGroupBySender,
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+  NotificationsItemPopupBySender,
+#endif
   NotificationsItemStatusBarStyle,
   NotificationsItem_Count,
 };
@@ -329,6 +332,29 @@ static void prv_notification_grouping_range_menu_push(SettingsNotificationsData 
                             true /* icons_enabled */, s_notification_grouping_range_labels, data);
 }
 
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+// Popup by Sender
+////////////////////////
+
+static void prv_notification_popup_grouping_range_menu_select(OptionMenu *option_menu,
+                                                              int selection, void *context) {
+  alerts_preferences_set_notification_popup_grouping_range((NotificationGroupingRange)selection);
+  app_window_stack_remove(&option_menu->window, true /* animated */);
+}
+
+static void prv_notification_popup_grouping_range_menu_push(SettingsNotificationsData *data) {
+  const OptionMenuCallbacks callbacks = {
+    .select = prv_notification_popup_grouping_range_menu_select,
+  };
+  /// Title for the setting that shows a sender's earlier notifications in the popup
+  const char *title = pbl_i18n_noop("Popup by Sender");
+  settings_option_menu_push(title, OptionMenuContentType_SingleLine,
+                            alerts_preferences_get_notification_popup_grouping_range(), &callbacks,
+                            ARRAY_LENGTH(s_notification_grouping_range_labels),
+                            true /* icons_enabled */, s_notification_grouping_range_labels, data);
+}
+#endif
+
 // Menu Layer Callbacks
 ////////////////////////
 
@@ -386,6 +412,15 @@ static void prv_draw_row_cb(SettingsCallbacks *context, GContext *ctx, const Lay
           [alerts_preferences_get_notification_grouping_range()];
       break;
     }
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+    case NotificationsItemPopupBySender: {
+      /// Notification settings item for showing a sender's earlier notifications in the popup
+      title = pbl_i18n_noop("Popup by Sender");
+      subtitle = s_notification_grouping_range_labels
+          [alerts_preferences_get_notification_popup_grouping_range()];
+      break;
+    }
+#endif
     case NotificationsItemStatusBarStyle: {
       /// String within Settings->Notifications that selects the notification status bar style
       title = pbl_i18n_noop("Status Bar");
@@ -435,6 +470,11 @@ static void prv_select_click_cb(SettingsCallbacks *context, uint16_t row) {
     case NotificationsItemGroupBySender:
       prv_notification_grouping_range_menu_push(data);
       break;
+#if defined(CONFIG_BT_MULTI_LINK_EXPERIMENT)
+    case NotificationsItemPopupBySender:
+      prv_notification_popup_grouping_range_menu_push(data);
+      break;
+#endif
     case NotificationsItemStatusBarStyle:
       prv_status_bar_style_menu_push(data);
       break;

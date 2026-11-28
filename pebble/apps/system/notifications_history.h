@@ -9,6 +9,10 @@
 #include <pbl/services/timeline/item.h>
 #include <pbl/util/list.h>
 
+//! Separates the app from the sender in an iOS group key
+#define NOTIFICATIONS_HISTORY_GROUP_KEY_SEPARATOR '\x1f'
+#define NOTIFICATIONS_HISTORY_GROUP_KEY_MAX_LEN   (2 * ATTRIBUTE_TITLE_MAX_LEN + 1)
+
 typedef struct NotificationHistoryEntry {
   Uuid id;
   time_t timestamp;
@@ -60,3 +64,10 @@ NotificationHistoryRow *notifications_history_get_row(const NotificationHistory 
 bool notifications_history_has_collapsed_groups(const NotificationHistory *history);
 bool notifications_history_row_is_collapsed_group(const NotificationHistoryRow *row);
 const Uuid *notifications_history_row_get_latest_id(const NotificationHistoryRow *row);
+
+//! Writes the sender key of @p item; returns it (inside @p buffer) or NULL if it is not grouped
+const char *notifications_history_group_key(const TimelineItem *item, char *buffer,
+                                            size_t buffer_size);
+
+//! The sender to show for a group's sender key
+const char *notifications_history_group_label(const char *sender);
