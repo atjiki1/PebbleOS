@@ -1,9 +1,10 @@
 > [!NOTE]
-> **개인용 multi-link 수정판입니다.** 공식 PebbleOS 릴리스에 iPhone + iPad 동시 연결과
-> 보낸 사람별 알림 보기를 더한 펌웨어를 자동으로 만들어요.
-> 공식 펌웨어와 다른 점, 설치와 사용 방법: **[.multilink/README.md](.multilink/README.md)** ·
-> 펌웨어: [Releases](https://github.com/atjiki1/PebbleOS/releases) ·
-> 한글 언어 팩: [PebbleOS-Korean](https://github.com/atjiki1/PebbleOS-Korean/releases)
+> **Personal multi-link build.** This fork automatically builds each official PebbleOS release
+> with two additions: a simultaneous iPhone + iPad connection and notifications grouped by sender.
+> What differs from the official firmware, and how to use it:
+> **[.multilink/README.md](.multilink/README.md)** (Korean) ·
+> Firmware: [Releases](https://github.com/atjiki1/PebbleOS/releases) ·
+> Korean language pack: [PebbleOS-Korean](https://github.com/atjiki1/PebbleOS-Korean/releases)
 
 <p align="center">
   <img src="docs/_static/images/logo.svg" alt="PebbleOS" width="320">
