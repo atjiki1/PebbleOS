@@ -207,7 +207,7 @@ jobs:
           Install: Pebble app > Devices > watch > Firmware Update Debug > Sideload FW.
           Do not take the official update the app offers: it replaces this firmware.
 
-          What differs from the official firmware: https://github.com/atjiki1/PebbleOS/blob/main/.multilink/README.md
+          What differs from the official firmware: https://github.com/atjiki1/PebbleOS/blob/main/.multilink/README.en.md
           Korean language pack: https://github.com/atjiki1/PebbleOS-Korean/releases
           pebbleos.pot lists the strings of this firmware."
           if gh release view "${RELEASE}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then

@@ -1,5 +1,7 @@
 # PebbleOS multi-link (개인용 수정판)
 
+**한국어** · [English](README.en.md)
+
 공식 [coredevices/PebbleOS](https://github.com/coredevices/PebbleOS) 릴리스에 패치를 붙여
 만든 개인용 펌웨어예요. Pebble Time 2(obelix)와 Pebble Round 2(getafix)를 **iPhone과 iPad에
 동시에** 연결하고, 알림을 보낸 사람별로 모아 보게 바꿨어요.
