@@ -1,18 +1,94 @@
-# multi-link patches
+# PebbleOS multi-link (개인용 수정판)
 
-Patches applied by `.github/workflows/multilink-release.yml` on top of each
-official PebbleOS release (`git am -3`), built with
-`CONFIG_BT_MULTI_LINK_EXPERIMENT=y` and published as `<tag>-multilink`.
+공식 [coredevices/PebbleOS](https://github.com/coredevices/PebbleOS) 릴리스에 패치를 붙여
+만든 개인용 펌웨어예요. Pebble Time 2(obelix)와 Pebble Round 2(getafix)를 **iPhone과 iPad에
+동시에** 연결하고, 알림을 보낸 사람별로 모아 보게 바꿨어요.
 
-They let a Pebble Time 2 / Round 2 stay connected to the phone and a
-secondary iOS device (e.g. an iPad) at once, and show the secondary device's
-notifications (ANCS), with duplicates removed. Group by Sender also
-groups the iOS notifications (0009), and Popup by Sender shows a
-sender's earlier messages on the popup card (0010).
+- 펌웨어: [Releases](https://github.com/atjiki1/PebbleOS/releases)의 `v<버전>-multilink`
+- 한글 언어 팩: [atjiki1/PebbleOS-Korean](https://github.com/atjiki1/PebbleOS-Korean/releases)의 `v<버전>-ko`
 
-Source branches: `multi-link-experiment` (0001-0008) and `ml-grouping`
-(the series on top of the latest release, 0001-0010). To update the patches:
+공식 펌웨어와 다른 점은 아래가 전부예요. 그 밖의 동작은 공식 펌웨어와 같아요.
 
-    git format-patch <tag>..ml-grouping -o .multilink/patches
+## 1. 두 번째 기기 연결 (iPhone + iPad)
 
-Notes, tests and history: `~/pebble-sync+2` on the owner's Mac.
+| | 공식 펌웨어 | 이 펌웨어 |
+|---|---|---|
+| 동시 연결 | 휴대폰 1대 | 휴대폰 1대 + 두 번째 기기 1대 (BLE 연결 2개) |
+| 두 번째 기기 알림 | 없음 | iPad 등 두 번째 iOS 기기의 알림도 받음 (ANCS) |
+| 다시 연결 | 휴대폰만 | 두 기기 모두 자동 재연결, 두 번째 기기는 iOS 설정 → 블루투스 → "기타 기기"에 보임 |
+
+**두 번째 기기 추가하기**
+1. 와치에서 설정 → Bluetooth 메뉴를 열어 둬요.
+2. iPad의 설정 → 블루투스에서 와치를 눌러 페어링해요.
+3. 와치가 진동하면 연결된 거예요. 이후에는 자동으로 다시 연결돼요.
+
+- 두 번째 기기는 1대까지예요. 바꾸려면 와치의 Bluetooth 메뉴에서 기존 기기를 지운 뒤 다시 페어링해요.
+- Pebble 앱은 휴대폰(첫 번째 기기)에서만 써요. 두 번째 기기는 알림만 받아요.
+- 같은 알림이 두 기기에서 30초 안에 오면 휴대폰 것 하나만 남겨요.
+- 두 번째 기기의 알림은 부제목 끝에 `· 기기 이름`이 붙어요.
+
+## 2. 알림을 보낸 사람별로 보기
+
+설정 → Notifications에 있는 두 설정이에요. 값은 둘 다 안 함 / 1일 / 1주 / 전체예요.
+
+**보낸 사람별 묶기 (Group by Sender)**: 공식 펌웨어에도 있는 설정이에요.
+- 공식은 안드로이드 알림만 묶어요. 이 펌웨어는 **iPhone·iPad 알림도** 묶어요.
+- 묶는 기준은 "앱 + 알림 제목"이에요. 같은 이름이라도 앱이 다르면 따로 묶여요.
+- 이 설정이 켜져 있으면:
+  - 묶음을 열면 그 사람 메시지 안에서만 위아래로 넘겨요.
+  - 한 줄짜리 알림을 열면 그 알림 하나만 보여요. 뒤로 가기를 누르면 목록으로 돌아가요.
+
+**팝업에 함께 보기 (Popup by Sender)**: 이 펌웨어에서 새로 추가한 설정이에요.
+- 새 메시지 팝업에 그 사람의 이전 메시지를 시각과 함께 최대 10개까지 이어서 보여 줘요.
+- 같은 사람 메시지가 연달아 와도 카드가 늘어나지 않고 한 장으로 합쳐져요.
+- 그 카드를 Dismiss하면 카드에 보이던 이전 메시지들도 iPhone·iPad에서 같이 지워져요. 뒤로 가기로 닫으면 아무것도 지워지지 않아요.
+
+알림 저장 방식은 공식과 같아요. 메시지는 하나씩 저장되고, 공간이 차면 가장 오래된 것부터 지워져요.
+
+## 3. 버전 표시
+
+- 와치의 설정 → System → Information에는 공식과 같은 버전(예: `v4.47.3`)이 보여요. 그래서 Pebble 앱이 "업데이트 있음" 알림을 띄우지 않아요.
+- 받은 파일 이름에는 `-multilink`가 붙어 있어요. 설치된 펌웨어가 이 수정판인지는 Bluetooth 메뉴의 두 번째 기기 안내 문구로 구분할 수 있어요.
+- **Pebble 앱이 공식 업데이트를 권하면 설치하지 마세요.** 이 기능이 모두 빠져요. 새 공식 버전이 나오면 이 저장소에서 자동으로 수정판이 만들어져요.
+
+## 4. 자동 빌드
+
+`.github/workflows/multilink-release.yml`
+- 매일 공식 저장소에 새 릴리스 태그(`vX.Y.Z`)가 있는지 확인해요.
+- 새 태그가 있으면 공식 소스에 `.multilink/patches/`의 패치를 순서대로 붙여요.
+- 그다음 `CONFIG_BT_MULTI_LINK_EXPERIMENT=y`로 4개 보드(obelix pvt/dvt, getafix dvt/dvt2)를 빌드해요.
+- 빌드한 파일은 `<태그>-multilink` 릴리스에 올리고, 그 펌웨어의 문구 목록 `pebbleos.pot`도 함께 올려요.
+- 성공과 실패는 Bark로 알려요.
+- 공식 코드가 크게 바뀌어 패치가 맞지 않으면 빌드가 실패해요. 그때는 패치를 새 버전에 맞게 고쳐야 해요.
+
+## 5. 패치 목록
+
+| 패치 | 내용 |
+|---|---|
+| 0001 | BLE 연결 2개 허용, 두 번째 기기 연결 관리 (`CONFIG_BT_MULTI_LINK_EXPERIMENT`) |
+| 0002 | 두 번째 기기의 페어링 정보를 휴대폰 것과 따로 저장 |
+| 0003 | Bluetooth 메뉴에서 두 번째 기기 페어링, 끊기면 다시 연결 |
+| 0004 | 두 번째 기기용 ANCS(알림) 클라이언트 추가 |
+| 0005 | 두 번째 기기를 위한 재연결 광고에 ANCS 요청을 넣어 iOS가 자동으로 다시 연결하게 함 |
+| 0006 | 페어링 중 광고에도 ANCS 요청을 넣어 iOS "기타 기기"에 보이게 함 |
+| 0007 | 다시 연결된 두 번째 기기의 페어링 정보 연결 (기기 이름 표시) |
+| 0008 | 두 기기의 같은 알림은 하나만 저장, 두 번째 기기 이름 표시 |
+| 0009 | 보낸 사람별 묶기에 iOS 알림 포함, 묶음/한 줄 알림 열기 동작 |
+| 0010 | 팝업에 같은 사람의 이전 메시지 함께 보기 (Popup by Sender) |
+
+코드 브랜치는 둘이에요.
+- `multi-link-experiment`: 0001-0008 개발 기록
+- `ml-grouping`: 최신 공식 태그 위에 0001-0010을 쌓은 브랜치
+
+패치를 다시 만들 때는 이렇게 해요.
+
+    git format-patch <태그>..ml-grouping -o .multilink/patches
+
+## 6. 알려진 제한
+
+- 두 번째 기기는 iOS(ANCS)만 지원해요.
+- 두 번째 기기는 알림 받기와 Dismiss 같은 알림 동작만 돼요. 앱 설치, 설정 동기화, 음성 답장은 휴대폰에서만 돼요.
+- iPad가 잠들어 있으면 다시 연결되는 데 몇 분 걸릴 수 있어요. iPad의 설정 → 블루투스를 열면 바로 연결돼요.
+- 와치가 다시 시작되면 저장된 알림이 모두 지워져요. 공식 펌웨어도 같아요.
+
+개인용 수정판이에요. 공식 지원 대상이 아니에요.
