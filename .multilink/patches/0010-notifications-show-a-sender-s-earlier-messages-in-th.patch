@@ -1,4 +1,4 @@
-From f7b969a8ab79ce99601bcb138957c3ff8f419a5c Mon Sep 17 00:00:00 2001
+From 17923e08341effa76956910e33d48f59b27983c0 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 27 Nov 2026 11:53:50 +0900
 Subject: [PATCH 10/10] notifications: show a sender's earlier messages in the
@@ -32,7 +32,7 @@ Signed-off-by: Claude <noreply@anthropic.com>
  create mode 100644 tests/pebble/apps/system_apps/notifications/test_notification_sender_popup.c
 
 diff --git a/include/pbl/services/notifications/alerts_preferences_private.h b/include/pbl/services/notifications/alerts_preferences_private.h
-index fafd855..8d4214d 100644
+index fafd855b..8d4214d6 100644
 --- a/include/pbl/services/notifications/alerts_preferences_private.h
 +++ b/include/pbl/services/notifications/alerts_preferences_private.h
 @@ -177,6 +177,21 @@ NotificationGroupingRange alerts_preferences_get_notification_grouping_range(voi
@@ -58,7 +58,7 @@ index fafd855..8d4214d 100644
  typedef enum {
    /** Regular clock (default). */
 diff --git a/pebble/apps/system/notifications_history.c b/pebble/apps/system/notifications_history.c
-index 33ec128..7bf969d 100644
+index 33ec1282..7bf969d7 100644
 --- a/pebble/apps/system/notifications_history.c
 +++ b/pebble/apps/system/notifications_history.c
 @@ -96,6 +96,11 @@ static const char *prv_group_sender_for_item(const TimelineItem *item, char *buf
@@ -74,7 +74,7 @@ index 33ec128..7bf969d 100644
    const char *separator = strchr(sender, NOTIFICATIONS_HISTORY_GROUP_KEY_SEPARATOR);
    return separator ? separator + 1 : sender;
 diff --git a/pebble/apps/system/notifications_history.h b/pebble/apps/system/notifications_history.h
-index 78e729c..24b4f56 100644
+index 78e729c2..24b4f56a 100644
 --- a/pebble/apps/system/notifications_history.h
 +++ b/pebble/apps/system/notifications_history.h
 @@ -65,5 +65,9 @@ bool notifications_history_has_collapsed_groups(const NotificationHistory *histo
@@ -88,7 +88,7 @@ index 78e729c..24b4f56 100644
  //! The sender to show for a group's sender key
  const char *notifications_history_group_label(const char *sender);
 diff --git a/pebble/apps/system/settings/notifications.c b/pebble/apps/system/settings/notifications.c
-index b3e159f..7d073ae 100644
+index b3e159f9..7d073ae4 100644
 --- a/pebble/apps/system/settings/notifications.c
 +++ b/pebble/apps/system/settings/notifications.c
 @@ -39,6 +39,9 @@ enum NotificationsItem {
@@ -161,7 +161,7 @@ index b3e159f..7d073ae 100644
        break;
 diff --git a/pebble/popups/notifications/notification_sender_popup.c b/pebble/popups/notifications/notification_sender_popup.c
 new file mode 100644
-index 0000000..1203ab1
+index 00000000..1203ab1d
 --- /dev/null
 +++ b/pebble/popups/notifications/notification_sender_popup.c
 @@ -0,0 +1,273 @@
@@ -440,7 +440,7 @@ index 0000000..1203ab1
 +#endif
 diff --git a/pebble/popups/notifications/notification_sender_popup.h b/pebble/popups/notifications/notification_sender_popup.h
 new file mode 100644
-index 0000000..0805f7f
+index 00000000..0805f7fe
 --- /dev/null
 +++ b/pebble/popups/notifications/notification_sender_popup.h
 @@ -0,0 +1,44 @@
@@ -489,7 +489,7 @@ index 0000000..0805f7f
 +bool notification_sender_popup_same_sender(const Uuid *a, const Uuid *b);
 +#endif
 diff --git a/pebble/popups/notifications/notification_window.c b/pebble/popups/notifications/notification_window.c
-index 34ca2cd..3097da3 100644
+index 34ca2cde..3097da3b 100644
 --- a/pebble/popups/notifications/notification_window.c
 +++ b/pebble/popups/notifications/notification_window.c
 @@ -5,6 +5,9 @@
@@ -625,7 +625,7 @@ index 34ca2cd..3097da3 100644
      data->first_notif_loaded = false;
      prv_show_peek_for_notification(data, id, true /* is_first_notification */);
 diff --git a/pebble/services/notifications/alerts_preferences.c b/pebble/services/notifications/alerts_preferences.c
-index d442c37..8a47b51 100644
+index d442c37f..8a47b511 100644
 --- a/pebble/services/notifications/alerts_preferences.c
 +++ b/pebble/services/notifications/alerts_preferences.c
 @@ -118,6 +118,10 @@ static bool s_notification_dismissal_sync = false;
@@ -674,7 +674,7 @@ index d442c37..8a47b51 100644
    RELOAD_IF_MATCH(PREF_KEY_NOTIF_TEXT_SIZE, s_notification_content_size);
    RELOAD_IF_MATCH(PREF_KEY_DND_MOTION_BACKLIGHT, s_dnd_motion_backlight);
 diff --git a/tests/pebble/apps/system_apps/notifications/CMakeLists.txt b/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
-index 7461e3a..8f47f99 100644
+index 7461e3a1..8f47f99d 100644
 --- a/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
 +++ b/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
 @@ -15,3 +15,9 @@ pbl_clar_test(test_notifications_history_ios
@@ -689,7 +689,7 @@ index 7461e3a..8f47f99 100644
 +)
 diff --git a/tests/pebble/apps/system_apps/notifications/test_notification_sender_popup.c b/tests/pebble/apps/system_apps/notifications/test_notification_sender_popup.c
 new file mode 100644
-index 0000000..57320a1
+index 00000000..57320a16
 --- /dev/null
 +++ b/tests/pebble/apps/system_apps/notifications/test_notification_sender_popup.c
 @@ -0,0 +1,56 @@
@@ -750,7 +750,7 @@ index 0000000..57320a1
 +  cl_assert_equal_s(small, "0:00 a\n");
 +}
 diff --git a/third_party/nonfree/pebbleos-nonfree b/third_party/nonfree/pebbleos-nonfree
-index 5ab558e..8482325 160000
+index 5ab558e5..8482325e 160000
 --- a/third_party/nonfree/pebbleos-nonfree
 +++ b/third_party/nonfree/pebbleos-nonfree
 @@ -1 +1 @@

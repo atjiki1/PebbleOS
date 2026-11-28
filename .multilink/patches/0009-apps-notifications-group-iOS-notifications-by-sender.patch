@@ -1,4 +1,4 @@
-From 9040c879c3e14c0084ebcc6a273ea36dd6de0654 Mon Sep 17 00:00:00 2001
+From ffa590b97dc963cef4ec78b6eb27971ab1ee390f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 27 Nov 2026 10:04:30 +0900
 Subject: [PATCH 09/10] apps/notifications: group iOS notifications by sender
@@ -15,7 +15,7 @@ list. New notifications are not added to such a view.
 Signed-off-by: Claude <noreply@anthropic.com>
 Assisted-by: LLM
 ---
- pebble/apps/system/notifications.c            |  34 ++++-
+ pebble/apps/system/notifications.c            |  35 ++++-
  pebble/apps/system/notifications_history.c    |  46 ++++++-
  pebble/apps/system/notifications_history.h    |   7 +
  .../notifications/notification_window.c       |  15 +++
@@ -23,11 +23,11 @@ Assisted-by: LLM
  .../notification_window_private.h             |   4 +
  .../system_apps/notifications/CMakeLists.txt  |   8 ++
  .../test_notifications_history_ios.c          | 125 ++++++++++++++++++
- 8 files changed, 236 insertions(+), 8 deletions(-)
+ 8 files changed, 237 insertions(+), 8 deletions(-)
  create mode 100644 tests/pebble/apps/system_apps/notifications/test_notifications_history_ios.c
 
 diff --git a/pebble/apps/system/notifications.c b/pebble/apps/system/notifications.c
-index 2b27834..da805ba 100644
+index 2b27834d..b33cea38 100644
 --- a/pebble/apps/system/notifications.c
 +++ b/pebble/apps/system/notifications.c
 @@ -118,9 +118,15 @@ static void prv_load_notification_storage(NotificationsData *data) {
@@ -68,7 +68,7 @@ index 2b27834..da805ba 100644
                                    fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD), GColorBlack,
                                    GColorWhite,
                                    PBL_IF_RECT_ELSE(GTextAlignmentLeft, GTextAlignmentCenter),
-@@ -394,6 +405,17 @@ static bool prv_push_notification_window(NotificationsData *data) {
+@@ -394,6 +405,18 @@ static bool prv_push_notification_window(NotificationsData *data) {
    return true;
  }
  
@@ -80,13 +80,14 @@ index 2b27834..da805ba 100644
 +  }
 +  notification_window_add_notification_by_id((Uuid *)id);
 +  notification_window_show();
++  notification_window_focus_notification((Uuid *)id, false /* animated */);
 +}
 +#endif
 +
  ///////////////////
  // Confirm Dialog
  
-@@ -656,6 +678,14 @@ static void prv_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, vo
+@@ -656,6 +679,14 @@ static void prv_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, vo
      return;
    }
  
@@ -101,7 +102,7 @@ index 2b27834..da805ba 100644
    bool success = prv_push_notification_window(notifications_data);
    if (!success) {
      // Bail if a notification came in ahead of us and created a modal window
-@@ -708,7 +738,7 @@ static int16_t prv_get_cell_height(struct MenuLayer *menu_layer, MenuIndex *cell
+@@ -708,7 +739,7 @@ static int16_t prv_get_cell_height(struct MenuLayer *menu_layer, MenuIndex *cell
  }
  
  static const char *prv_get_group_title(NotificationsData *data, const NotificationHistoryRow *row) {
@@ -111,7 +112,7 @@ index 2b27834..da805ba 100644
    const char *format = pbl_i18n_get("%s (%u)", data);
    const int title_length = snprintf(nullptr, 0, format, sender, (unsigned int)row->group.count);
 diff --git a/pebble/apps/system/notifications_history.c b/pebble/apps/system/notifications_history.c
-index e6c3302..33ec128 100644
+index e6c33029..33ec1282 100644
 --- a/pebble/apps/system/notifications_history.c
 +++ b/pebble/apps/system/notifications_history.c
 @@ -7,6 +7,7 @@
@@ -198,7 +199,7 @@ index e6c3302..33ec128 100644
    if (history->group_by_sender && (item->header.timestamp >= history->grouping_cutoff)) {
      sender = prv_group_sender_for_item(item, buffer, sizeof(buffer));
 diff --git a/pebble/apps/system/notifications_history.h b/pebble/apps/system/notifications_history.h
-index aae0cad..78e729c 100644
+index aae0cad6..78e729c2 100644
 --- a/pebble/apps/system/notifications_history.h
 +++ b/pebble/apps/system/notifications_history.h
 @@ -9,6 +9,10 @@
@@ -220,7 +221,7 @@ index aae0cad..78e729c 100644
 +//! The sender to show for a group's sender key
 +const char *notifications_history_group_label(const char *sender);
 diff --git a/pebble/popups/notifications/notification_window.c b/pebble/popups/notifications/notification_window.c
-index c4d4532..34ca2cd 100644
+index c4d45328..34ca2cde 100644
 --- a/pebble/popups/notifications/notification_window.c
 +++ b/pebble/popups/notifications/notification_window.c
 @@ -1425,7 +1425,17 @@ void notification_window_init(bool is_modal) {
@@ -254,7 +255,7 @@ index c4d4532..34ca2cd 100644
    bool should_focus = (app_window_stack_get_top_window() == &data->window);
    notification_window_add_notification_by_id(id);
 diff --git a/pebble/popups/notifications/notification_window.h b/pebble/popups/notifications/notification_window.h
-index a1fe914..27c6e69 100644
+index a1fe9149..27c6e697 100644
 --- a/pebble/popups/notifications/notification_window.h
 +++ b/pebble/popups/notifications/notification_window.h
 @@ -14,6 +14,11 @@ void notification_window_init(bool is_modal);
@@ -270,7 +271,7 @@ index a1fe914..27c6e69 100644
  
  bool notification_window_is_modal(void);
 diff --git a/pebble/popups/notifications/notification_window_private.h b/pebble/popups/notifications/notification_window_private.h
-index 849a718..24530e0 100644
+index 849a7183..24530e07 100644
 --- a/pebble/popups/notifications/notification_window_private.h
 +++ b/pebble/popups/notifications/notification_window_private.h
 @@ -20,6 +20,10 @@ typedef struct NotificationWindowData {
@@ -285,7 +286,7 @@ index 849a718..24530e0 100644
    bool window_frozen; // Don't pop when performing an action via a hotkey until the action completes
    bool first_notif_loaded;
 diff --git a/tests/pebble/apps/system_apps/notifications/CMakeLists.txt b/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
-index 7db0ee9..7461e3a 100644
+index 7db0ee9c..7461e3a1 100644
 --- a/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
 +++ b/tests/pebble/apps/system_apps/notifications/CMakeLists.txt
 @@ -7,3 +7,11 @@ pbl_clar_test(test_notifications_history
@@ -302,7 +303,7 @@ index 7db0ee9..7461e3a 100644
 +)
 diff --git a/tests/pebble/apps/system_apps/notifications/test_notifications_history_ios.c b/tests/pebble/apps/system_apps/notifications/test_notifications_history_ios.c
 new file mode 100644
-index 0000000..8f597c3
+index 00000000..8f597c3b
 --- /dev/null
 +++ b/tests/pebble/apps/system_apps/notifications/test_notifications_history_ios.c
 @@ -0,0 +1,125 @@
